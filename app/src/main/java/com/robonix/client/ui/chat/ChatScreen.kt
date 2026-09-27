@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.activity.compose.BackHandler
@@ -643,6 +644,42 @@ private fun parseMessageContent(raw: String): List<MessageContentPart> {
     return parts
 }
 
+/**
+ * Ambient narration (RTDL plan rounds, TTS start/done, task state changes):
+ * a muted one-line footnote instead of a bubble, so the robot's own speech
+ * stays the only card-like content in the transcript.
+ */
+@Composable
+private fun StatusLine(message: ChatMessage) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 1.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (message.meta.isNotBlank()) {
+            Text(
+                message.meta.uppercase(),
+                color = Muted.copy(alpha = 0.7f),
+                fontSize = 8.5.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.ExtraBold,
+                letterSpacing = 0.5.sp,
+            )
+            Spacer(Modifier.width(5.dp))
+        }
+        Text(
+            message.text,
+            color = Muted.copy(alpha = 0.85f),
+            fontSize = 10.5.sp,
+            lineHeight = 14.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
 @Composable
 fun MessageBubble(message: ChatMessage, isStreaming: Boolean = false) {
     val bgColor: androidx.compose.ui.graphics.Color
@@ -669,10 +706,10 @@ fun MessageBubble(message: ChatMessage, isStreaming: Boolean = false) {
             horizontalArrangement = Arrangement.Center
         }
         MessageRole.Status -> {
-            bgColor = Panel2.copy(alpha = 0.5f)
-            borderColor = Line
-            maxWidthFraction = 0.95f
-            horizontalArrangement = Arrangement.Center
+            // Status lines are ambient narration, not conversation; keep them
+            // out of the bubble layout so they never read like robot speech.
+            StatusLine(message)
+            return
         }
     }
 

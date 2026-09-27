@@ -1,5 +1,6 @@
 package com.robonix.client.ui.vitals
 
+import android.os.SystemClock
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -56,6 +57,58 @@ import java.util.Date
 import java.util.Locale
 import javax.inject.Inject
 
+// Hold windows for the anti-flicker gate. The simulated health source blips for
+// ~300ms at a time, so anything shorter than HEALTH_HOLD_MS is a strobe, not a
+// fault. Modules are polled every 3s, so a hold below the poll interval reduces
+// to "the same health seen on two consecutive polls".
+private const val HEALTH_HOLD_MS = 800L
+private const val MODULE_HEALTH_HOLD_MS = 1_000L
+
+/**
+ * Time based gate: [accept] reports true only once [key] has been the stable
+ * value for at least [holdMs]. A value that shows up once and reverts is
+ * dropped; the very first value is accepted immediately so the UI has
+ * something to show.
+ */
+private class KeyGate(private val holdMs: Long) {
+    private var shown: String? = null
+    private var pending: String? = null
+    private var pendingSince = 0L
+
+    fun accept(key: String, now: Long = SystemClock.elapsedRealtime()): Boolean {
+        if (key == shown) {
+            pending = null
+            return false
+        }
+        if (shown == null) {
+            shown = key
+            pending = null
+            return true
+        }
+        if (key != pending) {
+            pending = key
+            pendingSince = now
+            return false
+        }
+        if (now - pendingSince < holdMs) return false
+        shown = key
+        pending = null
+        return true
+    }
+
+    fun reset() {
+        shown = null
+        pending = null
+        pendingSince = 0L
+    }
+}
+
+private fun componentHealthKey(rows: List<ComponentHealthRow>): String =
+    rows.joinToString("|") { "${it.componentId}=${it.health}:${it.visualState}" }
+
+private fun moduleHealthKey(modules: List<ModuleHealth>): String =
+    modules.joinToString("|") { "${it.moduleKey}=${it.health}:${it.state}" }
+
 data class VitalsUiState(
     val description: RobotDescription? = null,
     val hardware: HardwareSnapshot? = null,
@@ -88,11 +141,23 @@ class VitalsViewModel @Inject constructor(
     private var pollJob: Job? = null
     private var lastSnapshot: VitalsSnapshot? = null
 
+    // Health is gated separately from the live analog values so the strobe never
+    // reaches the screen, while current readings (power, temperatures, TTLs)
+    // keep flowing through untouched.
+    private val healthGate = KeyGate(HEALTH_HOLD_MS)
+    private val moduleHealthGate = KeyGate(MODULE_HEALTH_HOLD_MS)
+    private var acceptedHealthRows: List<ComponentHealthRow>? = null
+    private var acceptedModuleHealth: Map<String, Pair<String, String>> = emptyMap()
+
     fun start(target: String) {
         if (target.isBlank()) return
         streamJob?.cancel()
         pollJob?.cancel()
         lastSnapshot = null
+        healthGate.reset()
+        moduleHealthGate.reset()
+        acceptedHealthRows = null
+        acceptedModuleHealth = emptyMap()
 
         loadDescription(target)
         loadModules(target)
@@ -104,9 +169,25 @@ class VitalsViewModel @Inject constructor(
                 try {
                     robotVitalsRepository.streamVitalsSnapshots(target).collect { snapshot ->
                         lastSnapshot = snapshot
+                        _uiState.update { it.copy(hardwareError = null, loaded = true) }
+                        // "-1" is the source's no-data sentinel: such a frame
+                        // carries no real health, so keeping the last known good
+                        // values is more truthful than flashing a fault.
+                        if (snapshot.power.batteryPercent < 0f || snapshot.power.voltage < 0f) {
+                            return@collect
+                        }
                         val description = _uiState.value.description ?: RobotVitalsMapper.fallbackRobotDescription()
                         val hardware = RobotVitalsMapper.snapshotToHardware(snapshot, description)
-                        _uiState.update { it.copy(hardware = hardware, hardwareError = null, loaded = true) }
+                        if (healthGate.accept(componentHealthKey(hardware.componentHealth))) {
+                            acceptedHealthRows = hardware.componentHealth
+                        }
+                        val rows = acceptedHealthRows
+                        _uiState.update {
+                            it.copy(
+                                hardware = if (rows == null) hardware else hardware.copy(componentHealth = rows),
+                                loaded = true,
+                            )
+                        }
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -143,11 +224,25 @@ class VitalsViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 val description = robotVitalsRepository.loadRobotDescription(target)
+                val previous = _uiState.value.description
+                // The description only changes shape very rarely; the periodic
+                // refresh must not re-publish a raw snapshot, which would bypass
+                // the health gate and flash a fault onto the screen.
+                val remapped = if (previous != null && previous != description && lastSnapshot != null) {
+                    RobotVitalsMapper.snapshotToHardware(lastSnapshot!!, description).also { mapped ->
+                        healthGate.reset()
+                        acceptedHealthRows = mapped.componentHealth
+                    }
+                } else {
+                    null
+                }
                 _uiState.update { state ->
-                    val hardware = lastSnapshot
-                        ?.let { RobotVitalsMapper.snapshotToHardware(it, description) }
-                        ?: state.hardware
-                    state.copy(description = description, hardware = hardware, descriptionError = null, loaded = true)
+                    state.copy(
+                        description = description,
+                        hardware = remapped ?: state.hardware,
+                        descriptionError = null,
+                        loaded = true,
+                    )
                 }
             } catch (e: Exception) {
                 _uiState.update { it.copy(descriptionError = e.message, loaded = true) }
@@ -159,7 +254,19 @@ class VitalsViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 val modules = vitalsRepository.getModuleHealthSnapshot(target)
-                _uiState.update { it.copy(modules = modules, moduleError = null) }
+                if (moduleHealthGate.accept(moduleHealthKey(modules))) {
+                    acceptedModuleHealth = modules.associate { it.moduleKey to (it.health to it.state) }
+                }
+                val accepted = acceptedModuleHealth
+                val shown = if (accepted.isEmpty()) {
+                    modules
+                } else {
+                    modules.map { module ->
+                        val health = accepted[module.moduleKey] ?: return@map module
+                        module.copy(health = health.first, state = health.second)
+                    }
+                }
+                _uiState.update { it.copy(modules = shown, moduleError = null) }
             } catch (e: Exception) {
                 _uiState.update { it.copy(moduleError = e.message) }
             }

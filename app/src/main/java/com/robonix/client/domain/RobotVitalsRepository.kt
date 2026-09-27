@@ -14,9 +14,11 @@ import io.grpc.CallOptions
 import io.grpc.MethodDescriptor
 import io.grpc.protobuf.ProtoUtils
 import io.grpc.stub.ClientCalls
+import io.grpc.stub.StreamObserver
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
@@ -112,15 +114,33 @@ class RobotVitalsRepository @Inject constructor(
 
     fun assetForPath(path: String): ByteArray? = assets[path]
 
-    fun streamVitalsSnapshots(atlasEndpoint: String): Flow<VitalsSnapshot> =
-        flow {
-            val endpoint = atlasClient.discoverEndpoint(atlasEndpoint, CONTRACT_VITALS_STREAM)
-            AppLog.write("VITALS", "vitals stream endpoint=$endpoint")
-            val channel = channelProvider.getChannel(endpoint)
-            val iterator = ClientCalls.blockingServerStreamingCall(
-                channel.newCall(STREAM_VITALS_METHOD, CallOptions.DEFAULT),
-                StreamVitals_Request.getDefaultInstance(),
-            )
-            while (iterator.hasNext()) emit(iterator.next())
-        }.flowOn(Dispatchers.IO)
+    fun streamVitalsSnapshots(atlasEndpoint: String): Flow<VitalsSnapshot> = callbackFlow {
+        val endpoint = atlasClient.discoverEndpoint(atlasEndpoint, CONTRACT_VITALS_STREAM)
+        AppLog.write("VITALS", "vitals stream endpoint=$endpoint")
+        val channel = channelProvider.getChannel(endpoint)
+        val call = channel.newCall(STREAM_VITALS_METHOD, CallOptions.DEFAULT)
+        // Async server stream: the gRPC call is owned here and torn down on
+        // collector cancellation via awaitClose, so leaving the Vitals screen
+        // (or switching robot host) actually closes the stream instead of
+        // leaving it to leak on an IO thread. Mirrors LiaisonClient's streams.
+        ClientCalls.asyncServerStreamingCall(
+            call,
+            StreamVitals_Request.getDefaultInstance(),
+            object : StreamObserver<VitalsSnapshot> {
+                override fun onNext(value: VitalsSnapshot) {
+                    trySend(value)
+                }
+
+                override fun onError(t: Throwable) {
+                    AppLog.write("VITALS", "vitals stream error: ${t.message}", t)
+                    close(t)
+                }
+
+                override fun onCompleted() {
+                    close()
+                }
+            },
+        )
+        awaitClose { call.cancel("vitals stream cancelled", null) }
+    }.flowOn(Dispatchers.IO)
 }

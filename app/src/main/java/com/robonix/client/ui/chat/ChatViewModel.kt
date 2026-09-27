@@ -321,7 +321,22 @@ class ChatViewModel @Inject constructor(
                 addTimeline(createTimelineEvent("error", l("tl.error.voice", e.message ?: l("common.unknown.error"))))
                 completedNormally = true
             } finally {
-                _uiState.update { it.copy(voiceActive = false, isRecording = false) }
+                _uiState.update {
+                    it.copy(
+                        voiceActive = false, isRecording = false,
+                        // A plain voice turn owns the task it started: once the
+                        // stream is closed we can no longer track it, so don't
+                        // leave the UI stuck busy (e.g. the robot restarted or
+                        // the stream dropped without a session_done). A steer
+                        // turn leaves the main task running — keep its state.
+                        isBusy = if (wasBusy) it.isBusy else false,
+                        isTaskRunning = if (wasBusy) it.isTaskRunning else false,
+                    )
+                }
+                // Release the robot's single reverse-audio slot once the turn is
+                // over: keeping it open would fight any other robonix-client
+                // (e.g. the desktop one) for the same slot.
+                audioRepository.disconnectBridge()
                 // Only persist a real turn — a discarded/cancelled press
                 // (too-brief release, stop) leaves junk sessions behind.
                 if (completedNormally) persistCurrentConversation()
@@ -711,7 +726,17 @@ class ChatViewModel @Inject constructor(
                 finishInFlight = false
                 recordingConfirmed = false
                 addTimeline(createTimelineEvent("voice", l("tl.session.done")))
-                _uiState.update { it.copy(voiceActive = false, isRecording = false, ttsPlaying = false) }
+                // The robot ends the voice session when the turn is over, so any
+                // task_state "in_progress" seen earlier is stale: release the
+                // busy/steer affordance here, otherwise the composer stays in
+                // "干预当前任务 / 正在处理" forever after a voice turn.
+                _uiState.update {
+                    it.copy(
+                        voiceActive = false, isRecording = false, ttsPlaying = false,
+                        isBusy = false, isTaskRunning = false,
+                        activeTurnId = "", activePilotSessionId = "",
+                    )
+                }
             }
             "error" -> {
                 finishInFlight = false

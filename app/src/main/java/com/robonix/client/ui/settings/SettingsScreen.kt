@@ -487,6 +487,7 @@ private fun NetworkSettingsTab(
 ) {
     var portText by remember(settings.atlasPort) { mutableStateOf(settings.atlasPort.toString()) }
     var showLangDialog by remember { mutableStateOf(false) }
+    var showDevLogsDialog by remember { mutableStateOf(false) }
     val currentLangLabel = languageOptions
         .firstOrNull { it.first == settings.language }?.second
         ?: "settings.language.system"
@@ -722,19 +723,33 @@ private fun NetworkSettingsTab(
             }
         }
 
-        // ── About ──
+        // ── About & Diagnostics ──
         item {
-            SectionLabel("关于")
+            SectionLabel("关于与调试")
             SettingsGroup {
                 SettingRow(
                     icon = Icons.Default.Info,
                     iconTint = Muted,
                     label = t("app.name"),
-                    description = "v0.3.1 · Android Native",
-                    showDivider = false,
+                    description = "v0.5 · Android Native",
+                    showDivider = true,
                 )
+                SettingRow(
+                    icon = Icons.Default.Terminal,
+                    iconTint = Cyan,
+                    label = t("settings.dev_logs"),
+                    description = t("settings.dev_logs.desc"),
+                    showDivider = false,
+                    onClick = { showDevLogsDialog = true },
+                ) {
+                    Icon(Icons.Default.ChevronRight, null, tint = Dim, modifier = Modifier.size(16.dp))
+                }
             }
         }
+    }
+
+    if (showDevLogsDialog) {
+        DeveloperLogsDialog(onDismissRequest = { showDevLogsDialog = false })
     }
 
     // Language Dialog (outside LazyColumn to avoid scroll issues)
@@ -1211,6 +1226,8 @@ private fun SystemSettingsTab(
     snapshot: com.robonix.client.data.model.SystemSnapshot?,
     onRefresh: () -> Unit,
 ) {
+    var showDevLogsDialog by remember { mutableStateOf(false) }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -1351,6 +1368,25 @@ private fun SystemSettingsTab(
                 }
             }
         }
+        item {
+            SectionLabel("调试与日志")
+            SettingsGroup {
+                SettingRow(
+                    icon = Icons.Default.Terminal,
+                    iconTint = Cyan,
+                    label = t("settings.dev_logs"),
+                    description = t("settings.dev_logs.desc"),
+                    showDivider = false,
+                    onClick = { showDevLogsDialog = true },
+                ) {
+                    Icon(Icons.Default.ChevronRight, null, tint = Dim, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+    }
+
+    if (showDevLogsDialog) {
+        DeveloperLogsDialog(onDismissRequest = { showDevLogsDialog = false })
     }
 }
 

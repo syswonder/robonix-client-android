@@ -2,7 +2,6 @@ package com.robonix.client.domain
 
 import com.robonix.client.AppLog
 import com.robonix.client.data.audio.AudioBridge
-import com.robonix.client.data.audio.AudioBridgeEvent
 import com.robonix.client.data.audio.AudioPlayer
 import com.robonix.client.data.audio.AudioRecorder
 import com.robonix.client.data.grpc.AtlasClient
@@ -17,11 +16,8 @@ import com.robonix.proto.audio.SelectAudioDevice_Response
 import io.grpc.MethodDescriptor
 import io.grpc.protobuf.ProtoUtils
 import io.grpc.stub.ClientCalls
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -73,9 +69,6 @@ class AudioRepository @Inject constructor(
             .setRequestMarshaller(ProtoUtils.marshaller(com.robonix.proto.voiceprint.Enroll_Request.getDefaultInstance()))
             .setResponseMarshaller(ProtoUtils.marshaller(com.robonix.proto.voiceprint.Enroll_Response.getDefaultInstance()))
             .build()
-
-    private var bridgeCollectionJob: Job? = null
-    private var bridgeScope: CoroutineScope? = null
 
     suspend fun getAudioProviders(target: String): Triple<List<AudioProvider>, List<AudioProvider>, List<AudioProvider>> =
         atlasClient.listAudioProviders(target)
@@ -266,18 +259,18 @@ class AudioRepository @Inject constructor(
 
         if (wsUrl == null) return null
 
-        // 5. Connect the WebSocket bridge
+        // 5. Connect the WebSocket bridge and wait until the handshake is done,
+        //    so the robot's mic stream finds a client when it opens.
         AppLog.write("AUDIO", "Connecting AudioBridge to $wsUrl")
         audioBridge.connect(wsUrl)
-        AppLog.write("AUDIO", "AudioBridge connected")
+        val ready = audioBridge.awaitConnected(3000)
+        AppLog.write("AUDIO", if (ready) "AudioBridge connected: $wsUrl" else "AudioBridge not connected: $wsUrl")
 
-        return wsUrl
+        return if (ready) wsUrl else null
     }
 
     fun disconnectBridge() {
         AppLog.write("AUDIO", "Disconnecting AudioBridge")
-        bridgeCollectionJob?.cancel()
-        bridgeCollectionJob = null
         audioBridge.disconnect()
     }
 

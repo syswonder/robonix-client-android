@@ -1,7 +1,6 @@
 package com.robonix.client.di
 
 import android.content.Context
-import com.robonix.client.data.audio.AudioBridge
 import com.robonix.client.data.audio.AudioPlayer
 import com.robonix.client.data.audio.AudioRecorder
 import com.robonix.client.data.grpc.AtlasClient
@@ -52,8 +51,4 @@ object AppModule {
     @Provides
     @Singleton
     fun provideAudioPlayer(): AudioPlayer = AudioPlayer()
-
-    @Provides
-    @Singleton
-    fun provideAudioBridge(): AudioBridge = AudioBridge()
 }

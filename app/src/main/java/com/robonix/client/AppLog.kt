@@ -16,6 +16,8 @@ import java.util.Locale
  */
 object AppLog {
     private var writer: PrintWriter? = null
+    private var logFile: File? = null
+    private val memoryLogs = ArrayDeque<String>(600)
     private val format = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
     private val lock = Any()
 
@@ -24,8 +26,9 @@ object AppLog {
             writer?.close()
             logDir.mkdirs()
             val f = File(logDir, "robonix.log")
-            // Rotate: keep last 256 KB
-            if (f.length() > 256 * 1024) {
+            logFile = f
+            // Rotate: keep last 512 KB
+            if (f.length() > 512 * 1024) {
                 f.delete()
             }
             writer = PrintWriter(FileWriter(f, true), true)
@@ -49,11 +52,53 @@ object AppLog {
         }
         // Also write to logcat (might be filtered, but doesn't hurt)
         Log.w("Robonix", line)
-        // Write to file
+        // Write to file and memory ring-buffer
         synchronized(lock) {
+            if (memoryLogs.size >= 600) {
+                memoryLogs.removeFirst()
+            }
+            memoryLogs.addLast(line)
             try {
                 writer?.println(line)
             } catch (_: Exception) {}
+        }
+    }
+
+    fun getLogs(maxLines: Int = 1000): String {
+        synchronized(lock) {
+            val f = logFile
+            if (f != null && f.exists() && f.length() > 0) {
+                return try {
+                    val lines = f.readLines()
+                    if (lines.size > maxLines) {
+                        lines.takeLast(maxLines).joinToString("\n")
+                    } else {
+                        lines.joinToString("\n")
+                    }
+                } catch (_: Exception) {
+                    memoryLogs.joinToString("\n")
+                }
+            }
+            return if (memoryLogs.isNotEmpty()) {
+                memoryLogs.joinToString("\n")
+            } else {
+                "暂无日志记录 (No logs recorded yet)"
+            }
+        }
+    }
+
+    fun clear() {
+        synchronized(lock) {
+            memoryLogs.clear()
+            writer?.close()
+            val f = logFile
+            if (f != null && f.exists()) {
+                f.delete()
+                try {
+                    writer = PrintWriter(FileWriter(f, true), true)
+                } catch (_: Exception) {}
+            }
+            write("SYSTEM", "Logs cleared by user")
         }
     }
 
