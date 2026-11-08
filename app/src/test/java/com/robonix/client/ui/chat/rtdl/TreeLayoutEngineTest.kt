@@ -37,11 +37,15 @@ class TreeLayoutEngineTest {
     }
 
     @Test
-    fun testTreeHierarchyAndActivePath() {
-        // Tree:
+    fun testSequenceSerialLayoutAndActivePath() {
+        // Serial Sequence:
         //       Node 0 (sequence)
-        //      /                 \
-        // Node 1 (action)      Node 2 (action, RUNNING)
+        //              │
+        //              ▼
+        //       Node 1 (action, SUCCEEDED)
+        //              │
+        //              ▼
+        //       Node 2 (action, RUNNING)
         val n0 = RtdlNode(index = 0, kindId = 1, kind = "sequence", children = listOf(1, 2), description = "Main Sequence")
         val n1 = RtdlNode(
             index = 1,
@@ -73,29 +77,50 @@ class TreeLayoutEngineTest {
         val node1 = result.nodes.find { it.node.index == 1 }!!
         val node2 = result.nodes.find { it.node.index == 2 }!!
 
-        // Node 0 should be at depth 0, children at depth 1
-        assertEquals(0, node0.depth)
-        assertEquals(1, node1.depth)
-        assertEquals(1, node2.depth)
+        // Strictly serial: All nodes are centered on the same X spine
+        assertEquals(node0.x, node1.x, 0.01f)
+        assertEquals(node1.x, node2.x, 0.01f)
 
-        // Node 0 should be horizontally centered between node 1 and node 2
-        assertEquals((node1.x + node2.x) / 2f, node0.x, 0.01f)
+        // Strictly serial: Flowing downward vertically
+        assertTrue("node0.y must be above node1.y", node0.y < node1.y)
+        assertTrue("node1.y must be above node2.y", node1.y < node2.y)
 
-        // Active path should be root (0) -> running node (2)
+        // Active path leading into running node (2)
         assertTrue(result.activeNodeIndices.contains(0))
         assertTrue(result.activeNodeIndices.contains(2))
-        assertFalse(result.activeNodeIndices.contains(1))
 
-        val edgeToRunning = result.edges.find { it.fromNode.node.index == 0 && it.toNode.node.index == 2 }!!
-        val edgeToDone = result.edges.find { it.fromNode.node.index == 0 && it.toNode.node.index == 1 }!!
-
+        val edgeToRunning = result.edges.find { it.fromNode.node.index == 1 && it.toNode.node.index == 2 }!!
         assertTrue(edgeToRunning.isActivePath)
-        assertFalse(edgeToDone.isActivePath)
 
         // Aggregated status of parent (0) should be RUNNING because child 2 is RUNNING
         assertEquals("RUNNING", node0.status)
         assertEquals("SUCCEEDED", node1.status)
         assertEquals("RUNNING", node2.status)
     }
-}
 
+    @Test
+    fun testParallelHorizontalLayout() {
+        // Parallel layout:
+        //       Node 0 (parallel)
+        //          /         \
+        //    Node 1 (action)   Node 2 (action)
+        val n0 = RtdlNode(index = 0, kindId = 1, kind = "parallel", children = listOf(1, 2), description = "Parallel Sensors")
+        val n1 = RtdlNode(index = 1, kindId = 2, kind = "action", children = emptyList(), call = CapabilityCall("c1", "camera", "stream", "start"))
+        val n2 = RtdlNode(index = 2, kindId = 2, kind = "action", children = emptyList(), call = CapabilityCall("c2", "lidar", "scan", "start"))
+        val plan = RtdlPlan("p3", "s3", 1, 0, listOf(n0, n1, n2))
+
+        val result = TreeLayoutEngine.computeLayout(plan, emptyMap())
+
+        assertEquals(3, result.nodes.size)
+        assertEquals(2, result.edges.size)
+
+        val node0 = result.nodes.find { it.node.index == 0 }!!
+        val node1 = result.nodes.find { it.node.index == 1 }!!
+        val node2 = result.nodes.find { it.node.index == 2 }!!
+
+        // In parallel, children are placed horizontally side-by-side
+        assertTrue("node1 should be to the left of node2", node1.x < node2.x)
+        assertEquals(node1.y, node2.y, 0.01f)
+        assertEquals((node1.x + node2.x) / 2f, node0.x, 0.01f)
+    }
+}

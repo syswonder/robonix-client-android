@@ -5,16 +5,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.CropFree
-import androidx.compose.material.icons.filled.GpsFixed
-import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -27,7 +19,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.robonix.client.data.model.RtdlNodeState
 import com.robonix.client.data.model.RtdlPlan
 import com.robonix.client.ui.theme.*
@@ -63,13 +54,12 @@ fun RtdlCanvasView(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1400, easing = LinearEasing),
+            animation = tween(1300, easing = LinearEasing),
             repeatMode = RepeatMode.Restart,
         ),
         label = "pulsePhase",
     )
 
-    // Helper functions for animating viewport
     fun animateCamera(targetScale: Float, targetOffset: Offset) {
         scope.launch {
             launch { scaleAnim.animateTo(targetScale.coerceIn(0.35f, 2.5f), spring(stiffness = Spring.StiffnessMediumLow)) }
@@ -123,7 +113,7 @@ fun RtdlCanvasView(
             }
         }
 
-        // 1. Cyber Grid & Connectors Canvas
+        // 1. Connectors Canvas with semantic status coloring & energy flow
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
@@ -135,7 +125,6 @@ fun RtdlCanvasView(
                     transformOrigin = TransformOrigin(0f, 0f)
                 },
         ) {
-            // Draw connections between nodes
             layoutResult.edges.forEach { edge ->
                 val from = edge.fromNode
                 val to = edge.toNode
@@ -154,27 +143,59 @@ fun RtdlCanvasView(
                     cubicTo(x0, ctrlY0, x1, ctrlY1, x1, y1)
                 }
 
-                // Connector line
+                // Branch color and stroke based on destination node's status
+                val toStatus = to.status.uppercase()
+                val isToRunning = toStatus in listOf("RUNNING", "ACTIVE", "VERIFYING")
+                val isToSucceeded = toStatus in listOf("SUCCEEDED", "SUCCESS")
+                val isToFailed = toStatus in listOf("FAILED", "ERROR", "TIMEOUT")
+
+                val baseLineColor = when {
+                    edge.isActivePath || isToRunning -> Amber
+                    isToFailed -> Red.copy(alpha = 0.75f)
+                    isToSucceeded -> Green.copy(alpha = 0.7f)
+                    else -> Cyan.copy(alpha = 0.45f)
+                }
+                val baseStrokeWidth = when {
+                    edge.isActivePath -> 2.6.dp.toPx()
+                    isToFailed -> 2.2.dp.toPx()
+                    isToSucceeded -> 2.2.dp.toPx()
+                    else -> 1.8.dp.toPx()
+                }
+
+                // Soft glowing aura for active or failed paths
                 if (edge.isActivePath) {
-                    // Glowing aura under active line
                     drawPath(
                         path = path,
                         color = Amber.copy(alpha = 0.25f),
                         style = Stroke(width = 6.dp.toPx(), cap = StrokeCap.Round),
                     )
+                } else if (isToFailed) {
                     drawPath(
                         path = path,
-                        color = Amber,
-                        style = Stroke(width = 2.6.dp.toPx(), cap = StrokeCap.Round),
-                    )
-                } else {
-                    // Crisp, high-contrast cyber connector line
-                    drawPath(
-                        path = path,
-                        color = Cyan.copy(alpha = 0.55f),
-                        style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round),
+                        color = Red.copy(alpha = 0.18f),
+                        style = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round),
                     )
                 }
+
+                // Main connector line
+                drawPath(
+                    path = path,
+                    color = baseLineColor,
+                    style = Stroke(width = baseStrokeWidth, cap = StrokeCap.Round),
+                )
+
+                // Directional arrowhead entering destination node
+                val arrowSize = 4.5.dp.toPx()
+                val arrowPath = Path().apply {
+                    moveTo(x1 - arrowSize, y1 - arrowSize * 1.6f)
+                    lineTo(x1, y1)
+                    lineTo(x1 + arrowSize, y1 - arrowSize * 1.6f)
+                }
+                drawPath(
+                    path = arrowPath,
+                    color = baseLineColor,
+                    style = Stroke(width = baseStrokeWidth, cap = StrokeCap.Round),
+                )
 
                 // Energy Pulse Animation along Active Paths
                 if (edge.isActivePath) {
@@ -221,116 +242,5 @@ fun RtdlCanvasView(
                 )
             }
         }
-
-        // 3. Floating HUD Controls (Bottom-Right)
-        Surface(
-            color = Panel.copy(alpha = 0.85f),
-            shape = RoundedCornerShape(16.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, LineSoft),
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(12.dp),
-        ) {
-            Column(
-                modifier = Modifier.padding(4.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                // Focus Active Node Button
-                val runningNode = layoutResult.nodes.find {
-                    it.status.uppercase() in listOf("RUNNING", "ACTIVE", "VERIFYING")
-                }
-                IconButton(
-                    onClick = {
-                        val targetNode = runningNode ?: layoutResult.nodes.firstOrNull()
-                        if (targetNode != null) {
-                            with(density) {
-                                val targetScale = 1.0f
-                                val targetPanX = (viewportWidthPx / 2f) - (targetNode.x.dp.toPx() * targetScale)
-                                val targetPanY = (viewportHeightPx / 2f) - (targetNode.y.dp.toPx() * targetScale)
-                                animateCamera(targetScale, Offset(targetPanX, targetPanY))
-                            }
-                        }
-                    },
-                    modifier = Modifier.size(32.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.GpsFixed,
-                        contentDescription = "Focus Active",
-                        tint = if (runningNode != null) Amber else Cyan,
-                        modifier = Modifier.size(16.dp),
-                    )
-                }
-
-                // Fit View / Reset View Button
-                IconButton(
-                    onClick = {
-                        if (layoutResult.nodes.isNotEmpty()) {
-                            val b = layoutResult.bounds
-                            with(density) {
-                                val treeWidthPx = (b.width + 60f).dp.toPx()
-                                val treeHeightPx = (b.height + 80f).dp.toPx()
-                                val targetScale = min(viewportWidthPx / max(treeWidthPx, 1f), viewportHeightPx / max(treeHeightPx, 1f))
-                                    .coerceIn(0.45f, 1.1f)
-                                val treeCenterXPx = ((b.left + b.right) / 2f).dp.toPx()
-                                val treeCenterYPx = ((b.top + b.bottom) / 2f).dp.toPx()
-
-                                val targetPanX = (viewportWidthPx / 2f) - (treeCenterXPx * targetScale)
-                                val targetPanY = max(24.dp.toPx(), (viewportHeightPx / 2f) - (treeCenterYPx * targetScale))
-
-                                animateCamera(targetScale, Offset(targetPanX, targetPanY))
-                            }
-                        }
-                    },
-                    modifier = Modifier.size(32.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.CropFree,
-                        contentDescription = "Fit View",
-                        tint = Text,
-                        modifier = Modifier.size(16.dp),
-                    )
-                }
-
-                // Zoom In Button
-                IconButton(
-                    onClick = {
-                        val newScale = (scaleAnim.value * 1.25f).coerceAtMost(2.5f)
-                        val factor = newScale / scaleAnim.value
-                        val newPanX = (viewportWidthPx / 2f) - ((viewportWidthPx / 2f) - panXAnim.value) * factor
-                        val newPanY = (viewportHeightPx / 2f) - ((viewportHeightPx / 2f) - panYAnim.value) * factor
-                        animateCamera(newScale, Offset(newPanX, newPanY))
-                    },
-                    modifier = Modifier.size(32.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "Zoom In",
-                        tint = Text,
-                        modifier = Modifier.size(16.dp),
-                    )
-                }
-
-                // Zoom Out Button
-                IconButton(
-                    onClick = {
-                        val newScale = (scaleAnim.value / 1.25f).coerceAtLeast(0.35f)
-                        val factor = newScale / scaleAnim.value
-                        val newPanX = (viewportWidthPx / 2f) - ((viewportWidthPx / 2f) - panXAnim.value) * factor
-                        val newPanY = (viewportHeightPx / 2f) - ((viewportHeightPx / 2f) - panYAnim.value) * factor
-                        animateCamera(newScale, Offset(newPanX, newPanY))
-                    },
-                    modifier = Modifier.size(32.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Remove,
-                        contentDescription = "Zoom Out",
-                        tint = Text,
-                        modifier = Modifier.size(16.dp),
-                    )
-                }
-            }
-        }
     }
 }
-

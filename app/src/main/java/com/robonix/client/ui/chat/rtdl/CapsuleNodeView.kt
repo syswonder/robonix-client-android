@@ -6,7 +6,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.AltRoute
@@ -14,6 +13,7 @@ import androidx.compose.material.icons.automirrored.filled.CallSplit
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircleOutline
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FormatListNumbered
 import androidx.compose.material.icons.filled.Lens
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
@@ -52,10 +52,10 @@ fun CapsuleNodeView(
     val infiniteTransition = rememberInfiniteTransition(label = "nodeGlow")
     val glowAlpha by if (isRunning) {
         infiniteTransition.animateFloat(
-            initialValue = 0.25f,
-            targetValue = 0.85f,
+            initialValue = 0.3f,
+            targetValue = 0.95f,
             animationSpec = infiniteRepeatable(
-                animation = tween(1100, easing = FastOutSlowInEasing),
+                animation = tween(1000, easing = FastOutSlowInEasing),
                 repeatMode = RepeatMode.Reverse,
             ),
             label = "glowAlpha",
@@ -69,7 +69,7 @@ fun CapsuleNodeView(
             initialValue = 2f,
             targetValue = 8f,
             animationSpec = infiniteRepeatable(
-                animation = tween(1100, easing = FastOutSlowInEasing),
+                animation = tween(1000, easing = FastOutSlowInEasing),
                 repeatMode = RepeatMode.Reverse,
             ),
             label = "glowRadius",
@@ -79,17 +79,41 @@ fun CapsuleNodeView(
     }
 
     val nodeIcon: ImageVector = when (node.kind.lowercase()) {
-        "action" -> Icons.Default.PlayArrow
-        "sequence" -> Icons.AutoMirrored.Filled.AltRoute
-        "fallback", "selector" -> Icons.AutoMirrored.Filled.CallSplit
+        "sequence" -> Icons.Default.FormatListNumbered
+        "parallel" -> Icons.AutoMirrored.Filled.CallSplit
+        "fallback", "selector" -> Icons.AutoMirrored.Filled.AltRoute
         "condition" -> Icons.Default.CheckCircleOutline
+        "action" -> Icons.Default.PlayArrow
         else -> Icons.Default.Lens
     }
 
-    val label = node.call?.name
-        ?: node.opId.ifBlank { node.description.ifBlank { node.kind } }
+    // Single concise, human-readable title without repetitive noise
+    val label = when {
+        node.call != null -> node.call.name.substringAfterLast("/")
+        node.description.isNotBlank() && !node.description.contains("-") && node.description.length <= 18 ->
+            node.description
+        node.kind.isNotBlank() && node.kind.lowercase() in listOf("sequence", "parallel", "selector", "fallback", "condition") ->
+            node.kind.replaceFirstChar { it.uppercase() }
+        node.opId.isNotBlank() && !node.opId.contains("-") ->
+            node.opId.substringAfterLast("/")
+        else -> node.kind.replaceFirstChar { it.uppercase() }
+    }
 
-    val shape = RoundedCornerShape(22.dp)
+    val cardBg = when {
+        isSucceeded -> Color(0xFF0D221D)
+        isFailed -> Color(0xFF281215)
+        isRunning -> Color(0xFF281F0D)
+        else -> Panel2
+    }
+
+    val themeColor = when {
+        isRunning -> Amber
+        isSucceeded -> Green
+        isFailed -> Red
+        else -> Cyan
+    }
+
+    val shape = RoundedCornerShape(14.dp)
 
     Box(
         modifier = modifier
@@ -98,30 +122,30 @@ fun CapsuleNodeView(
                 if (isRunning) {
                     Modifier.drawBehind {
                         drawRoundRect(
-                            color = Amber.copy(alpha = glowAlpha * 0.45f),
-                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(22.dp.toPx()),
+                            color = Amber.copy(alpha = glowAlpha * 0.4f),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(14.dp.toPx()),
                             style = Stroke(width = glowRadius.dp.toPx()),
                         )
                     }
                 } else Modifier
             )
             .clip(shape)
-            .background(Panel2)
+            .background(cardBg)
             .border(
                 border = BorderStroke(
-                    width = if (isSelected) 2.dp else if (isRunning) 1.5.dp else 0.8.dp,
+                    width = if (isSelected) 2.dp else if (isRunning) 1.5.dp else 1.dp,
                     color = when {
                         isSelected -> Cyan
                         isRunning -> Amber.copy(alpha = glowAlpha)
-                        isSucceeded -> Green.copy(alpha = 0.6f)
-                        isFailed -> Red.copy(alpha = 0.7f)
+                        isSucceeded -> Green.copy(alpha = 0.65f)
+                        isFailed -> Red.copy(alpha = 0.75f)
                         else -> LineSoft
                     },
                 ),
                 shape = shape,
             )
             .clickable { onClick() }
-            .padding(horizontal = 10.dp, vertical = 6.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
     ) {
         Row(
@@ -129,73 +153,122 @@ fun CapsuleNodeView(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            // Left: Node Kind Icon
+            // Left: Node Icon inside a soft squircle container
             Surface(
-                color = if (isRunning) Amber.copy(alpha = 0.18f) else Cyan.copy(alpha = 0.12f),
-                shape = CircleShape,
-                modifier = Modifier.size(24.dp),
+                color = themeColor.copy(alpha = 0.15f),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.size(32.dp),
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = nodeIcon,
                         contentDescription = null,
-                        tint = if (isRunning) Amber else Cyan,
-                        modifier = Modifier.size(13.dp),
+                        tint = themeColor,
+                        modifier = Modifier.size(17.dp),
                     )
                 }
             }
 
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(10.dp))
 
-            // Center: Node index and short action name
-            Column(
+            // Center: Clean, unclipped single-line title (#index + action/kind name)
+            Row(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "#${node.index} $label",
+                    text = "#${node.index}",
+                    color = themeColor,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = label,
                     color = Text,
-                    fontSize = 11.sp,
+                    fontSize = 13.5.sp,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    text = node.kind.uppercase(),
-                    color = Dim,
-                    fontSize = 8.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                    maxLines = 1,
-                )
             }
 
-            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.width(8.dp))
 
-            // Right: Status Badge
-            Box(
-                modifier = Modifier.size(16.dp),
-                contentAlignment = Alignment.Center,
+            // Right: Glanceable status badge with icon & text
+            Surface(
+                color = when {
+                    isRunning -> Amber.copy(alpha = 0.16f)
+                    isSucceeded -> Green.copy(alpha = 0.14f)
+                    isFailed -> Red.copy(alpha = 0.16f)
+                    else -> LineSoft.copy(alpha = 0.4f)
+                },
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(
+                    width = 0.8.dp,
+                    color = when {
+                        isRunning -> Amber.copy(alpha = 0.45f)
+                        isSucceeded -> Green.copy(alpha = 0.4f)
+                        isFailed -> Red.copy(alpha = 0.45f)
+                        else -> LineSoft
+                    },
+                ),
             ) {
-                when {
-                    isRunning -> PulsingStatusDot(color = Amber, size = 6.dp)
-                    isSucceeded -> Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = null,
-                        tint = Green,
-                        modifier = Modifier.size(12.dp),
-                    )
-                    isFailed -> Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = null,
-                        tint = Red,
-                        modifier = Modifier.size(12.dp),
-                    )
-                    else -> Box(
-                        modifier = Modifier
-                            .size(5.dp)
-                            .clip(CircleShape)
-                            .background(Dim.copy(alpha = 0.6f)),
-                    )
+                Row(
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    when {
+                        isRunning -> {
+                            PulsingStatusDot(color = Amber, size = 5.dp)
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "运行中",
+                                color = Amber,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                        isSucceeded -> {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = null,
+                                tint = Green,
+                                modifier = Modifier.size(11.dp),
+                            )
+                            Spacer(Modifier.width(3.dp))
+                            Text(
+                                text = "成功",
+                                color = Green,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                        isFailed -> {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = null,
+                                tint = Red,
+                                modifier = Modifier.size(11.dp),
+                            )
+                            Spacer(Modifier.width(3.dp))
+                            Text(
+                                text = "失败",
+                                color = Red,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                        else -> {
+                            Text(
+                                text = "等待",
+                                color = Dim,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                    }
                 }
             }
         }

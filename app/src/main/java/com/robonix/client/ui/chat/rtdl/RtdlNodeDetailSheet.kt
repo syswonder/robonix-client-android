@@ -64,8 +64,16 @@ fun RtdlNodeDetailSheet(
         else -> Icons.Default.Lens
     }
 
-    val actionName = node.call?.name
-        ?: node.opId.ifBlank { node.description.ifBlank { node.kind } }
+    val actionName = when {
+        node.call != null -> node.call.name.substringAfterLast("/")
+        node.kind.isNotBlank() && node.kind.lowercase() in listOf("sequence", "parallel", "selector", "fallback", "condition") ->
+            node.kind.replaceFirstChar { it.uppercase() }
+        node.description.isNotBlank() && !node.description.contains("-") && node.description.length <= 20 ->
+            node.description
+        node.opId.isNotBlank() && !node.opId.contains("-") ->
+            node.opId.substringAfterLast("/")
+        else -> node.kind.replaceFirstChar { it.uppercase() }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,

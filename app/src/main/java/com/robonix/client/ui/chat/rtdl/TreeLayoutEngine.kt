@@ -12,8 +12,8 @@ data class LayoutNode(
     val depth: Int,
     val x: Float, // Center X in dp
     val y: Float, // Center Y in dp
-    val width: Float = 130f,
-    val height: Float = 42f,
+    val width: Float = 240f,
+    val height: Float = 50f,
     val status: String,
     val stateObj: RtdlNodeState?,
     val parentIndex: Int?,
@@ -42,10 +42,10 @@ data class TreeLayoutResult(
 )
 
 object TreeLayoutEngine {
-    const val DEFAULT_NODE_WIDTH = 132f
-    const val DEFAULT_NODE_HEIGHT = 44f
-    const val DEFAULT_H_GAP = 24f
-    const val DEFAULT_V_GAP = 52f
+    const val DEFAULT_NODE_WIDTH = 240f
+    const val DEFAULT_NODE_HEIGHT = 50f
+    const val DEFAULT_H_GAP = 28f
+    const val DEFAULT_V_GAP = 32f
 
     /**
      * Resolves node statuses matching the web client and RtdlScreen:
@@ -112,7 +112,9 @@ object TreeLayoutEngine {
     }
 
     /**
-     * Computes 2D coordinates and edges for the behavior tree.
+     * Computes 2D coordinates and edges for the behavior tree:
+     * - Sequence, Selector, and Fallback nodes are laid out strictly SERIAL (串行, vertically).
+     * - Parallel nodes are laid out in PARALLEL (并列, horizontally).
      */
     fun computeLayout(
         plan: RtdlPlan,
@@ -144,12 +146,15 @@ object TreeLayoutEngine {
             roots.add(plan.nodes.first())
         }
 
-        // Build subtree layout trees
+        // Subtree bounding and layout structure
         class SubtreeBox(
             val node: RtdlNode,
             val children: List<SubtreeBox>,
+            val isParallel: Boolean,
             var width: Float,
-            var relativeCenterOffset: Float, // Center X relative to subtree's left edge
+            var height: Float,
+            var relativeCenterX: Float,
+            var relativeCenterY: Float,
             var parentIndex: Int? = null,
         )
 
@@ -158,43 +163,72 @@ object TreeLayoutEngine {
         fun buildBox(node: RtdlNode, parentIdx: Int?): SubtreeBox {
             visited.add(node.index)
             val validChildren = node.children.mapNotNull { byIndex[it] }.filter { it.index !in visited }
+            val isParallel = node.kind.equals("parallel", ignoreCase = true) ||
+                node.kind.equals("concurrent", ignoreCase = true)
+
             val childBoxes = validChildren.map { buildBox(it, node.index) }
 
             if (childBoxes.isEmpty()) {
-                return SubtreeBox(node, emptyList(), nodeWidth, nodeWidth / 2f, parentIdx)
+                return SubtreeBox(
+                    node = node,
+                    children = emptyList(),
+                    isParallel = isParallel,
+                    width = nodeWidth,
+                    height = nodeHeight,
+                    relativeCenterX = nodeWidth / 2f,
+                    relativeCenterY = nodeHeight / 2f,
+                    parentIndex = parentIdx,
+                )
             }
 
-            val totalChildrenWidth = childBoxes.sumOf { it.width.toDouble() }.toFloat() +
-                (childBoxes.size - 1) * hGap
+            if (isParallel) {
+                // Parallel execution: children placed horizontally side-by-side
+                val totalChildrenWidth = childBoxes.sumOf { it.width.toDouble() }.toFloat() +
+                    (childBoxes.size - 1) * hGap
+                val maxChildrenHeight = childBoxes.maxOf { it.height }
+                val subtreeWidth = max(nodeWidth, totalChildrenWidth)
+                val subtreeHeight = nodeHeight + vGap + maxChildrenHeight
 
-            val subtreeWidth = max(nodeWidth, totalChildrenWidth)
+                return SubtreeBox(
+                    node = node,
+                    children = childBoxes,
+                    isParallel = true,
+                    width = subtreeWidth,
+                    height = subtreeHeight,
+                    relativeCenterX = subtreeWidth / 2f,
+                    relativeCenterY = nodeHeight / 2f,
+                    parentIndex = parentIdx,
+                )
+            } else {
+                // Serial execution (Sequence / Selector / Fallback): children placed vertically in sequence
+                val maxChildrenWidth = childBoxes.maxOf { it.width }
+                val totalChildrenHeight = childBoxes.sumOf { it.height.toDouble() }.toFloat() +
+                    (childBoxes.size - 1) * vGap
+                val subtreeWidth = max(nodeWidth, maxChildrenWidth)
+                val subtreeHeight = nodeHeight + vGap + totalChildrenHeight
 
-            // Center of the first and last child to calculate parent center
-            val childrenSpanStart = if (totalChildrenWidth < subtreeWidth) {
-                (subtreeWidth - totalChildrenWidth) / 2f
-            } else 0f
-
-            var runningX = childrenSpanStart
-            val childCenters = childBoxes.map { cBox ->
-                val cCenter = runningX + cBox.relativeCenterOffset
-                runningX += cBox.width + hGap
-                cCenter
+                return SubtreeBox(
+                    node = node,
+                    children = childBoxes,
+                    isParallel = false,
+                    width = subtreeWidth,
+                    height = subtreeHeight,
+                    relativeCenterX = subtreeWidth / 2f,
+                    relativeCenterY = nodeHeight / 2f,
+                    parentIndex = parentIdx,
+                )
             }
-
-            val parentCenter = (childCenters.first() + childCenters.last()) / 2f
-
-            return SubtreeBox(node, childBoxes, subtreeWidth, parentCenter, parentIdx)
         }
 
         val rootBoxes = roots.map { buildBox(it, null) }
 
-        // Compute absolute positions
+        // Compute absolute positions & construct edges
         val layoutNodes = mutableListOf<LayoutNode>()
-        val parentMap = mutableMapOf<Int, Int>()
+        val rawEdges = mutableListOf<Triple<Int, Int, Boolean>>() // fromIndex, toIndex, isParentChild
 
-        fun placeBoxes(box: SubtreeBox, depth: Int, leftX: Float) {
-            val centerX = leftX + box.relativeCenterOffset
-            val centerY = depth * (nodeHeight + vGap) + (nodeHeight / 2f)
+        fun placeBoxes(box: SubtreeBox, leftX: Float, topY: Float, depth: Int) {
+            val centerX = leftX + box.relativeCenterX
+            val centerY = topY + box.relativeCenterY
 
             val rawState = nodeStates[box.node.index]
             val hasChildren = box.children.isNotEmpty()
@@ -213,36 +247,50 @@ object TreeLayoutEngine {
                 childrenIndices = box.children.map { it.node.index },
             )
             layoutNodes.add(lNode)
-            if (box.parentIndex != null) {
-                parentMap[box.node.index] = box.parentIndex!!
-            }
 
-            // Position children
-            val totalChildrenWidth = box.children.sumOf { it.width.toDouble() }.toFloat() +
-                (box.children.size - 1) * hGap
+            if (box.children.isEmpty()) return
 
-            val childrenSpanStart = leftX + if (totalChildrenWidth < box.width) {
-                (box.width - totalChildrenWidth) / 2f
-            } else 0f
+            if (box.isParallel) {
+                // Parallel: children laid out horizontally side-by-side
+                val totalChildrenWidth = box.children.sumOf { it.width.toDouble() }.toFloat() +
+                    (box.children.size - 1) * hGap
+                val childrenSpanStart = leftX + (box.width - totalChildrenWidth) / 2f
+                val childTop = topY + nodeHeight + vGap
 
-            var childLeft = childrenSpanStart
-            box.children.forEach { cBox ->
-                placeBoxes(cBox, depth + 1, childLeft)
-                childLeft += cBox.width + hGap
+                var childLeft = childrenSpanStart
+                box.children.forEach { cBox ->
+                    placeBoxes(cBox, childLeft, childTop, depth + 1)
+                    rawEdges.add(Triple(box.node.index, cBox.node.index, true))
+                    childLeft += cBox.width + hGap
+                }
+            } else {
+                // Serial (Sequence / Selector): children laid out vertically in order
+                var childTop = topY + nodeHeight + vGap
+                var previousNodeIndex = box.node.index
+
+                box.children.forEachIndexed { i, cBox ->
+                    val childLeft = leftX + (box.width - cBox.width) / 2f
+                    placeBoxes(cBox, childLeft, childTop, depth + 1 + i)
+
+                    // Serial execution edge from previous node to this node
+                    rawEdges.add(Triple(previousNodeIndex, cBox.node.index, i == 0))
+                    previousNodeIndex = cBox.node.index
+
+                    childTop += cBox.height + vGap
+                }
             }
         }
 
         var rootLeft = 0f
         rootBoxes.forEach { rBox ->
-            placeBoxes(rBox, 0, rootLeft)
+            placeBoxes(rBox, rootLeft, 24f, 0)
             rootLeft += rBox.width + hGap * 2
         }
 
         val nodesByIndex = layoutNodes.associateBy { it.node.index }
 
-        // Identify Active Path (from roots down to running nodes)
+        // Identify Active Path: edges leading into RUNNING / ACTIVE nodes
         val runningNodes = layoutNodes.filter { it.status.uppercase() in listOf("RUNNING", "ACTIVE", "VERIFYING") }
-        val activePathEdges = mutableSetOf<Pair<Int, Int>>() // Pair(parentIndex, childIndex)
         val activeNodeIndices = mutableSetOf<Int>()
 
         runningNodes.forEach { runningNode ->
@@ -250,25 +298,21 @@ object TreeLayoutEngine {
             while (curr != null) {
                 activeNodeIndices.add(curr.node.index)
                 val pIdx = curr.parentIndex
-                if (pIdx != null) {
-                    activePathEdges.add(Pair(pIdx, curr.node.index))
-                    curr = nodesByIndex[pIdx]
-                } else {
-                    curr = null
-                }
+                curr = if (pIdx != null) nodesByIndex[pIdx] else null
             }
         }
 
-        // Construct Edges
-        val edges = mutableListOf<LayoutEdge>()
-        layoutNodes.forEach { parent ->
-            parent.childrenIndices.forEach { childIdx ->
-                val child = nodesByIndex[childIdx]
-                if (child != null) {
-                    val isActive = Pair(parent.node.index, childIdx) in activePathEdges
-                    edges.add(LayoutEdge(parent, child, isActive))
-                }
-            }
+        // Construct LayoutEdges
+        val edges = rawEdges.mapNotNull { (fromIdx, toIdx, _) ->
+            val fromNode = nodesByIndex[fromIdx]
+            val toNode = nodesByIndex[toIdx]
+            if (fromNode != null && toNode != null) {
+                // Active if leading directly into an active/running node
+                val isRunningTarget = toNode.status.uppercase() in listOf("RUNNING", "ACTIVE", "VERIFYING")
+                val isRunningSource = fromNode.status.uppercase() in listOf("RUNNING", "ACTIVE", "VERIFYING")
+                val isActive = isRunningTarget || (isRunningSource && toNode.status.uppercase() !in listOf("FAILED", "ERROR"))
+                LayoutEdge(fromNode, toNode, isActive)
+            } else null
         }
 
         // Compute Bounding Rect
@@ -287,4 +331,3 @@ object TreeLayoutEngine {
         )
     }
 }
-

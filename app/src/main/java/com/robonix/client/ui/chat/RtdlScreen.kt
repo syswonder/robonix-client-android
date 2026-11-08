@@ -35,6 +35,7 @@ import com.robonix.client.ui.chat.rtdl.RtdlCanvasView
 import com.robonix.client.ui.chat.rtdl.RtdlNodeDetailSheet
 import com.robonix.client.ui.chat.rtdl.TreeLayoutEngine
 import com.robonix.client.ui.components.CyberCard
+import com.robonix.client.ui.components.PulsingStatusDot
 import com.robonix.client.ui.i18n.t
 import com.robonix.client.ui.i18n.tStatus
 import com.robonix.client.ui.navigation.SharedViewModel
@@ -43,8 +44,11 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -57,6 +61,8 @@ data class RtdlUiState(
     val livePlan: RtdlPlan? = null,
     val liveNodeStates: Map<Int, RtdlNodeState> = emptyMap(),
     val error: String? = null,
+    val taskState: TaskState? = null,
+    val selectedTaskId: String? = null,
 )
 
 @HiltViewModel
@@ -68,6 +74,21 @@ class RtdlViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(RtdlUiState())
     val uiState: StateFlow<RtdlUiState> = _uiState.asStateFlow()
 
+    /** Filtered plan records based on selected task's planIds when tasks.size > 1. */
+    val filteredPlanRecords: StateFlow<List<PlanRecord>> = _uiState.map { state ->
+        val tasks = state.taskState?.tasks ?: emptyList()
+        if (tasks.size <= 1) return@map state.planRecords
+
+        val effectiveTaskId = state.selectedTaskId ?: tasks.lastOrNull()?.taskId
+        if (effectiveTaskId == null) return@map state.planRecords
+
+        val selectedTask = tasks.find { it.taskId == effectiveTaskId }
+        val allowedPlanIds = selectedTask?.planIds?.toSet() ?: emptySet()
+        if (allowedPlanIds.isEmpty()) return@map emptyList()
+
+        state.planRecords.filter { it.plan.planId in allowedPlanIds }
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
     private var pollJob: Job? = null
 
     init {
@@ -76,6 +97,16 @@ class RtdlViewModel @Inject constructor(
         }
         viewModelScope.launch {
             rtdlState.liveNodeStates.collect { ns -> _uiState.update { it.copy(liveNodeStates = ns) } }
+        }
+        viewModelScope.launch {
+            rtdlState.taskState.collect { ts -> _uiState.update { it.copy(taskState = ts) } }
+        }
+        viewModelScope.launch {
+            rtdlState.selectedTaskId.collect { id ->
+                _uiState.update { state ->
+                    state.copy(selectedTaskId = id, selectedRecordIndex = 0)
+                }
+            }
         }
         viewModelScope.launch {
             rtdlState.planRecords.collect { recs ->
@@ -103,7 +134,7 @@ class RtdlViewModel @Inject constructor(
         pollJob?.cancel()
     }
 
-    fun refresh(target: String) {
+    fun refresh(@Suppress("UNUSED_PARAMETER") target: String) {
         _uiState.update { it.copy(isRefreshing = true) }
         viewModelScope.launch {
             delay(400L)
@@ -114,6 +145,10 @@ class RtdlViewModel @Inject constructor(
     fun selectRecordIndex(index: Int) {
         _uiState.update { it.copy(selectedRecordIndex = index) }
     }
+
+    fun selectTask(taskId: String?) {
+        rtdlState.selectTask(taskId)
+    }
 }
 
 @Composable
@@ -122,6 +157,7 @@ fun RtdlScreen(
     sharedViewModel: SharedViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
+    val filteredRecords by viewModel.filteredPlanRecords.collectAsState()
     val settings by sharedViewModel.settings.collectAsState()
 
     LaunchedEffect(settings.atlasEndpoint) {
@@ -147,9 +183,11 @@ fun RtdlScreen(
 
         BehaviorTreeSection(
             state = state,
+            filteredRecords = filteredRecords,
             isRefreshing = state.isRefreshing,
             onRefresh = { viewModel.refresh(settings.atlasEndpoint) },
             onSelectRecord = { viewModel.selectRecordIndex(it) },
+            onSelectTask = { viewModel.selectTask(it) },
             modifier = Modifier.fillMaxSize(),
         )
     }
@@ -158,15 +196,16 @@ fun RtdlScreen(
 @Composable
 private fun BehaviorTreeSection(
     state: RtdlUiState,
+    filteredRecords: List<PlanRecord>,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
     onSelectRecord: (Int) -> Unit,
+    onSelectTask: (String?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var inspectedNodeIndex by remember { mutableStateOf<Int?>(null) }
 
-    val records = state.planRecords
-    val selectedRecord = records.getOrNull(state.selectedRecordIndex)
+    val selectedRecord = filteredRecords.getOrNull(state.selectedRecordIndex)
     val plan = selectedRecord?.plan ?: state.livePlan
     val nodeStates = selectedRecord?.nodeStates ?: state.liveNodeStates
 
@@ -184,8 +223,9 @@ private fun BehaviorTreeSection(
     }
 
     Column(modifier = modifier) {
-        // Round Selector Chips (only when multiple rounds exist, sleek & minimal)
-        if (records.size > 1) {
+        // 1. Task Selector Chips (separated per task, shown when multiple tasks exist)
+        val tasks = state.taskState?.tasks ?: emptyList()
+        if (tasks.size > 1) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -194,7 +234,62 @@ private fun BehaviorTreeSection(
                     .padding(bottom = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                records.forEachIndexed { i, record ->
+                tasks.forEachIndexed { i, task ->
+                    val isSelected = when {
+                        state.selectedTaskId != null -> state.selectedTaskId == task.taskId
+                        else -> i == tasks.size - 1 // follow-latest: last task selected by default
+                    }
+                    val isRunning = task.status.lowercase() in listOf("running", "active", "executing")
+                    val isFailed = task.status.lowercase() in listOf("failed", "error")
+                    val borderColor = when {
+                        isSelected -> Amber
+                        isRunning -> Amber.copy(alpha = 0.6f)
+                        isFailed -> Red.copy(alpha = 0.6f)
+                        else -> LineSoft
+                    }
+                    Surface(
+                        color = if (isSelected) Amber.copy(alpha = 0.18f) else Panel2,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, borderColor),
+                        modifier = Modifier.selectable(
+                            selected = isSelected,
+                            role = Role.RadioButton,
+                            onClick = { onSelectTask(if (i == tasks.size - 1) null else task.taskId) },
+                        ),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (isRunning) {
+                                PulsingStatusDot(color = Amber, size = 5.dp)
+                                Spacer(Modifier.width(4.dp))
+                            }
+                            Text(
+                                text = task.goal.take(16).ifBlank { "任务 #${i + 1}" },
+                                color = if (isSelected) Amber else Text,
+                                fontSize = 11.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Round Selector Chips (each task has multiple rounds)
+        if (filteredRecords.size > 1) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .selectableGroup()
+                    .padding(bottom = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                filteredRecords.forEachIndexed { i, record ->
                     val isSelected = i == state.selectedRecordIndex
                     Surface(
                         color = if (isSelected) Cyan.copy(alpha = 0.2f) else Panel2,
@@ -218,7 +313,7 @@ private fun BehaviorTreeSection(
             }
         }
 
-        // Summary Card with Refresh button
+        // 3. Compact Cyber Summary Card with Refresh button
         BehaviorTreeSummaryCard(
             plan = plan,
             nodeStates = nodeStates,
@@ -228,7 +323,7 @@ private fun BehaviorTreeSection(
 
         Spacer(Modifier.height(8.dp))
 
-        // Dynamic Interactive Canvas occupying full space
+        // 4. Dynamic Interactive Canvas (Edge-to-edge, status-colored branches & capsules)
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -369,7 +464,7 @@ private fun BehaviorTreeSummaryCard(
                         .fillMaxWidth(fraction = progress.coerceIn(0f, 1f))
                         .fillMaxHeight()
                         .clip(RoundedCornerShape(2.dp))
-                        .background(if (failed > 0) Amber else Cyan),
+                        .background(if (failed > 0) Red else if (running > 0) Amber else Cyan),
                 )
             }
         }
