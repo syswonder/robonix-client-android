@@ -63,10 +63,22 @@ message SessionStatusEvent {
   string message = 3;
 }
 
+message TaskSummary {
+  string task_id = 1;
+  string goal = 2;
+  string success_criterion = 3;
+  string status = 4;
+  string status_reason = 5;
+  repeated string message_ids = 6;
+  repeated string plan_ids = 7;
+}
+
 message TaskStateEvent {
   string goal = 1;
   string success_criterion = 2;
   string status = 3;
+  string task_id = 4;
+  repeated TaskSummary tasks = 5;
 }
 
 message PilotEvent {

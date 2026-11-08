@@ -57,6 +57,18 @@ data class TaskState(
     val goal: String = "",
     val successCriterion: String = "",
     val status: String = "idle",
+    val taskId: String = "",
+    val tasks: List<TaskSummary> = emptyList(),
+)
+
+data class TaskSummary(
+    val taskId: String,
+    val goal: String,
+    val successCriterion: String,
+    val status: String,
+    val statusReason: String = "",
+    val messageIds: List<String> = emptyList(),
+    val planIds: List<String> = emptyList(),
 )
 
 data class ExecutorPlan(

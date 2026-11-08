@@ -46,6 +46,11 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.withStyle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -158,8 +163,7 @@ fun ChatScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .imePadding()
-                .navigationBarsPadding(),
+                .imePadding(),
         ) {
             // Goal Panel
             AnimatedVisibility(visible = state.taskState != null) {
@@ -644,6 +648,45 @@ private fun parseMessageContent(raw: String): List<MessageContentPart> {
     return parts
 }
 
+private fun buildMarkdownAnnotatedString(text: String, defaultColor: androidx.compose.ui.graphics.Color): AnnotatedString {
+    return buildAnnotatedString {
+        var i = 0
+        val len = text.length
+        while (i < len) {
+            if (i + 1 < len && text[i] == '*' && text[i + 1] == '*') {
+                val end = text.indexOf("**", i + 2)
+                if (end != -1) {
+                    withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = defaultColor)) {
+                        append(text.substring(i + 2, end))
+                    }
+                    i = end + 2
+                    continue
+                }
+            } else if (text[i] == '`') {
+                val end = text.indexOf('`', i + 1)
+                if (end != -1) {
+                    withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = Panel3, color = Cyan)) {
+                        append(text.substring(i + 1, end))
+                    }
+                    i = end + 1
+                    continue
+                }
+            } else if (text[i] == '*') {
+                val end = text.indexOf('*', i + 1)
+                if (end != -1 && end > i + 1 && text[end - 1] != ' ') {
+                    withStyle(SpanStyle(fontStyle = FontStyle.Italic, color = defaultColor)) {
+                        append(text.substring(i + 1, end))
+                    }
+                    i = end + 1
+                    continue
+                }
+            }
+            append(text[i])
+            i++
+        }
+    }
+}
+
 /**
  * Ambient narration (RTDL plan rounds, TTS start/done, task state changes):
  * a muted one-line footnote instead of a bubble, so the robot's own speech
@@ -753,9 +796,9 @@ fun MessageBubble(message: ChatMessage, isStreaming: Boolean = false) {
                     CodeBlockView(code = part.content, language = part.language)
                     Spacer(Modifier.height(4.dp))
                 } else {
+                    val annotated = remember(part.content) { buildMarkdownAnnotatedString(part.content, Text) }
                     Text(
-                        part.content,
-                        color = Text,
+                        annotated,
                         fontSize = 13.5.sp,
                         lineHeight = 19.sp,
                     )
@@ -834,9 +877,8 @@ fun ComposerBar(
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Bottom,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Voice button — press-and-hold to talk with slide-to-cancel (slide up)
                 Box(
                     modifier = Modifier
                         .size(48.dp)
@@ -890,7 +932,8 @@ fun ComposerBar(
                     )
                 }
 
-                // Text input
+                Spacer(Modifier.width(4.dp))
+
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { if (it.length <= characterLimit) onInputChange(it) },
@@ -918,23 +961,24 @@ fun ComposerBar(
                     keyboardActions = KeyboardActions(onSend = { onSend() }),
                 )
 
-                Spacer(Modifier.width(4.dp))
-
-                // Stop button — compact, icon-only when busy
                 AnimatedVisibility(visible = isBusy) {
-                    IconButton(
-                        onClick = onStop,
-                        modifier = Modifier.size(44.dp),
-                    ) {
-                        Icon(
-                            Icons.Default.Stop, t("action.stop"),
-                            tint = Red,
-                            modifier = Modifier.size(22.dp),
-                        )
+                    Row {
+                        Spacer(Modifier.width(4.dp))
+                        IconButton(
+                            onClick = onStop,
+                            modifier = Modifier.size(48.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Stop, t("action.stop"),
+                                tint = Red,
+                                modifier = Modifier.size(22.dp),
+                            )
+                        }
                     }
                 }
 
-                // Send / Steer button
+                Spacer(Modifier.width(4.dp))
+
                 Button(
                     onClick = onSend,
                     enabled = inputText.isNotBlank(),

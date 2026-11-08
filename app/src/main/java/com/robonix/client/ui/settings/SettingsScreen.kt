@@ -155,7 +155,7 @@ fun SettingsScreen(
                         onUpdateSettings = { sharedViewModel.updateSettings(it) },
                         onSave = {
                             sharedViewModel.saveSettings()
-                            saveFeedback = "设置已保存"
+                            saveFeedback = AppStrings.format(settings.language, "msg.settings.saved")
                             scope.launch {
                                 delay(2000)
                                 saveFeedback = null
@@ -532,9 +532,9 @@ private fun NetworkSettingsTab(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             when {
-                                isConnecting -> "正在连接..."
-                                isOnline -> "已连接"
-                                else -> "未连接"
+                                isConnecting -> tStatus("CONNECTING")
+                                isOnline -> tStatus("ONLINE")
+                                else -> tStatus("OFFLINE")
                             },
                             color = statusColor,
                             fontSize = 13.sp,
@@ -552,7 +552,7 @@ private fun NetworkSettingsTab(
                         }
                     }
                     PillButton(
-                        text = if (isOnline) "重测" else "连接",
+                        text = if (isOnline) t("settings.btn.retest") else t("settings.btn.connect"),
                         icon = if (isOnline) Icons.Default.Refresh else Icons.Default.PlayArrow,
                         color = statusColor,
                         onClick = onConnect,
@@ -595,7 +595,7 @@ private fun NetworkSettingsTab(
                                     onUpdateSettings { s -> s.copy(robotHost = v) }
                                 }
                             },
-                            placeholder = "IP 地址",
+                            placeholder = t("settings.host.placeholder"),
                             label = t("settings.host"),
                             icon = Icons.Default.Computer,
                             modifier = Modifier.weight(1f),
@@ -725,7 +725,7 @@ private fun NetworkSettingsTab(
 
         // ── About & Diagnostics ──
         item {
-            SectionLabel("关于与调试")
+            SectionLabel(t("settings.section.about_debug"))
             SettingsGroup {
                 SettingRow(
                     icon = Icons.Default.Info,
@@ -878,7 +878,7 @@ private fun AudioSettingsTab(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Text("运行状态", color = Muted, fontSize = 11.sp)
+                                Text(t("settings.audio.running_status"), color = Muted, fontSize = 11.sp)
                                 Surface(
                                     color = Green.copy(alpha = 0.15f),
                                     shape = RoundedCornerShape(999.dp),
@@ -1369,7 +1369,7 @@ private fun SystemSettingsTab(
             }
         }
         item {
-            SectionLabel("调试与日志")
+            SectionLabel(t("settings.section.debug_logs"))
             SettingsGroup {
                 SettingRow(
                     icon = Icons.Default.Terminal,

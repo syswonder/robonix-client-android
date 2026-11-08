@@ -59,6 +59,15 @@ data class SignalState(
     val visualState: String = "unknown",
 )
 
+/** Client-local health transition record — not backed by any server event. */
+data class AlertEvent(
+    val componentId: String,
+    val componentLabel: String,
+    val fromHealth: String,
+    val toHealth: String,
+    val timestampMs: Long,
+)
+
 data class BodyComponentState(
     val id: String = "",
     val parentId: String = "",

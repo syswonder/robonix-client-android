@@ -195,7 +195,9 @@ fun AppNavigation() {
         NavHost(
             navController = navController,
             startDestination = Screen.Chat.route,
-            modifier = Modifier.padding(innerPadding),
+            // consumeWindowInsets: the bottom bar already covers the nav-bar inset,
+            // so Chat's imePadding() only adds the part of the keyboard above it.
+            modifier = Modifier.padding(innerPadding).consumeWindowInsets(innerPadding),
             enterTransition = { fadeIn(animationSpec = tween(300)) + slideInHorizontally(tween(300)) { it / 4 } },
             exitTransition = { fadeOut(animationSpec = tween(300)) + slideOutHorizontally(tween(300)) { -it / 4 } },
             popEnterTransition = { fadeIn(animationSpec = tween(300)) + slideInHorizontally(tween(300)) { -it / 4 } },

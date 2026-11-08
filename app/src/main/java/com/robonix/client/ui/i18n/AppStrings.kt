@@ -66,6 +66,7 @@ object AppStrings {
         // rtdl
         "rtdl.tab.active" to "Active ({0})",
         "rtdl.tab.history" to "History ({0})",
+        "rtdl.record" to "Round {0} ({1} nodes)",
         "rtdl.loading" to "Loading Executor plans...",
         "rtdl.active.empty" to "Executor reports no active RTDL plans.",
         "rtdl.live.tree" to "Live Behavior Tree",
@@ -233,6 +234,8 @@ object AppStrings {
         "vitals.signals" to "Signals",
         "vitals.components" to "{0} components",
         "vitals.charging" to "Charging",
+        "vitals.alert.title" to "Health alerts",
+        "vitals.alert.recovered" to "Recovered",
 
         // timeline
         "tl.task" to "task: {0}",
@@ -281,6 +284,19 @@ object AppStrings {
         "status.UNKNOWN" to "Unknown",
         "status.WARN" to "Warn",
         "status.STALE" to "Stale",
+        "status.VERIFYING" to "Verifying",
+        "status.PAUSED" to "Paused",
+
+        "rtdl.plan.id" to "Plan ID: {0}",
+        "rtdl.nodes.completed" to "{0} / {1} nodes completed",
+        "rtdl.call.args" to "Arguments (Args):",
+        "rtdl.call.result" to "Result ({0}):",
+        "rtdl.node.kind" to "Kind: {0}",
+        "rtdl.active.empty.desc" to "Executor is idle and ready for navigation, manipulation, and perception tasks.",
+        "rtdl.history.empty.desc" to "The complete RTDL tree will be rendered here once a task is started.",
+        "common.success" to "Success",
+        "common.failed" to "Failed",
+        "session.default.title" to "New Session",
 
         // perception
         "perception.title" to "Robonix Perception Matrix",
@@ -292,6 +308,11 @@ object AppStrings {
         "perception.tab.map" to "Grid Map",
         "perception.snapshot" to "Snapshot",
         "perception.snapshot.saved" to "Snapshot saved to gallery",
+        "perception.snapshot.documentSaved" to "Snapshot saved",
+        "perception.snapshot.failed" to "Could not save snapshot",
+        "perception.snapshot.unavailable" to "No image available for this channel",
+        "perception.snapshot.choose" to "Choose image to export",
+        "perception.snapshot.cancel" to "Cancel",
         "perception.depth.probe" to "Distance: {0} m",
         "perception.depth.hint" to "Tap heatmap to probe distance",
         "perception.lidar.range" to "Range: {0} m",
@@ -308,6 +329,20 @@ object AppStrings {
         "vitals.3d.collapse" to "Collapse 3D Model",
         "hud.latency" to "{0} ms",
         "hud.host" to "Host: {0}",
+
+        "perception.header.title" to "Spatial Perception",
+        "perception.layer.map" to "Map",
+        "perception.layer.regions" to "Regions",
+        "perception.layer.objects" to "Objects",
+        "perception.layer.robot" to "Robot",
+        "perception.layer.lidar" to "LiDAR",
+
+        "settings.btn.retest" to "Retest",
+        "settings.btn.connect" to "Connect",
+        "settings.host.placeholder" to "IP address",
+        "settings.section.about_debug" to "About & Debug",
+        "settings.audio.running_status" to "Status",
+        "settings.section.debug_logs" to "Debug & Logs",
     )
 
     private val zh: Map<String, String> = mapOf(
@@ -359,6 +394,7 @@ object AppStrings {
         // rtdl
         "rtdl.tab.active" to "进行中（{0}）",
         "rtdl.tab.history" to "历史（{0}）",
+        "rtdl.record" to "第 {0} 轮（{1} 个节点）",
         "rtdl.loading" to "正在加载执行器计划…",
         "rtdl.active.empty" to "执行器暂无进行中的 RTDL 计划",
         "rtdl.live.tree" to "实时行为树",
@@ -526,6 +562,8 @@ object AppStrings {
         "vitals.signals" to "信号",
         "vitals.components" to "{0} 个部件",
         "vitals.charging" to "充电中",
+        "vitals.alert.title" to "健康告警",
+        "vitals.alert.recovered" to "已恢复",
 
         // timeline
         "tl.task" to "任务：{0}",
@@ -574,6 +612,19 @@ object AppStrings {
         "status.UNKNOWN" to "未知",
         "status.WARN" to "警告",
         "status.STALE" to "过期",
+        "status.VERIFYING" to "校验中",
+        "status.PAUSED" to "已暂停",
+
+        "rtdl.plan.id" to "计划 ID: {0}",
+        "rtdl.nodes.completed" to "{0} / {1} 节点已完成",
+        "rtdl.call.args" to "调用参数 (Args):",
+        "rtdl.call.result" to "执行结果 ({0}):",
+        "rtdl.node.kind" to "类型: {0}",
+        "rtdl.active.empty.desc" to "当前后端执行器空闲，待命接收导航、操作与感知任务",
+        "rtdl.history.empty.desc" to "对话产生任务后，此处将自动绘制完整的 RTDL 行为决策树",
+        "common.success" to "成功",
+        "common.failed" to "失败",
+        "session.default.title" to "新会话",
 
         // perception
         "perception.title" to "Robonix 空间感知矩阵",
@@ -585,6 +636,11 @@ object AppStrings {
         "perception.tab.map" to "占据地图",
         "perception.snapshot" to "快照",
         "perception.snapshot.saved" to "感知快照已保存",
+        "perception.snapshot.documentSaved" to "快照已保存",
+        "perception.snapshot.failed" to "快照保存失败",
+        "perception.snapshot.unavailable" to "当前通道暂无可导出的图像",
+        "perception.snapshot.choose" to "选择要导出的图像",
+        "perception.snapshot.cancel" to "取消",
         "perception.depth.probe" to "探测物距：{0} 米",
         "perception.depth.hint" to "轻触深度图任意区域探测物距",
         "perception.lidar.range" to "探测半径：{0} 米",
@@ -601,6 +657,20 @@ object AppStrings {
         "vitals.3d.collapse" to "收起 3D 数字孪生",
         "hud.latency" to "{0} 毫秒",
         "hud.host" to "目标：{0}",
+
+        "perception.header.title" to "空间感知",
+        "perception.layer.map" to "地图",
+        "perception.layer.regions" to "区域",
+        "perception.layer.objects" to "目标",
+        "perception.layer.robot" to "机器人",
+        "perception.layer.lidar" to "雷达",
+
+        "settings.btn.retest" to "重测",
+        "settings.btn.connect" to "连接",
+        "settings.host.placeholder" to "IP 地址",
+        "settings.section.about_debug" to "关于与调试",
+        "settings.audio.running_status" to "运行状态",
+        "settings.section.debug_logs" to "调试与日志",
     )
 
     private val dictionaries = mapOf(ZH to zh, EN to en)

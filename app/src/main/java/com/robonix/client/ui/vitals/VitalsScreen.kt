@@ -19,6 +19,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.animation.*
@@ -28,11 +29,13 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.robonix.client.data.model.ComponentHealthRow
+import com.robonix.client.data.model.AlertEvent
 import com.robonix.client.data.model.HardwareSnapshot
 import com.robonix.client.data.model.ModuleHealth
 import com.robonix.client.data.model.ProviderInfo
 import com.robonix.client.data.model.RobotComponent
 import com.robonix.client.data.model.RobotDescription
+import com.robonix.client.data.local.AlertHistoryStore
 import com.robonix.client.domain.RobotVitalsMapper
 import com.robonix.client.domain.RobotVitalsRepository
 import com.robonix.client.domain.SystemRepository
@@ -119,6 +122,7 @@ data class VitalsUiState(
     val hardwareError: String? = null,
     val moduleError: String? = null,
     val selected: ModuleHealth? = null,
+    val alerts: List<AlertEvent> = emptyList(),
 )
 
 private data class TreeNode(
@@ -132,6 +136,7 @@ class VitalsViewModel @Inject constructor(
     private val vitalsRepository: VitalsRepository,
     private val robotVitalsRepository: RobotVitalsRepository,
     private val systemRepository: SystemRepository,
+    private val alertHistoryStore: AlertHistoryStore,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(VitalsUiState())
@@ -148,6 +153,42 @@ class VitalsViewModel @Inject constructor(
     private val moduleHealthGate = KeyGate(MODULE_HEALTH_HOLD_MS)
     private var acceptedHealthRows: List<ComponentHealthRow>? = null
     private var acceptedModuleHealth: Map<String, Pair<String, String>> = emptyMap()
+
+    init {
+        viewModelScope.launch {
+            val history = alertHistoryStore.loadAll()
+            _uiState.update { it.copy(alerts = history) }
+        }
+    }
+
+    /**
+     * Compares the previously accepted (debounced) health rows against the newly
+     * accepted ones, emitting an AlertEvent for each component whose severity
+     * worsened or improved. Must run on the already-gated rows, not the raw
+     * snapshot, or it reintroduces the strobe the gate exists to filter out.
+     */
+    private fun diffHealthRows(previous: List<ComponentHealthRow>?, current: List<ComponentHealthRow>): List<AlertEvent> {
+        if (previous == null) return emptyList()
+        val previousById = previous.associateBy { it.componentId }
+        val now = System.currentTimeMillis()
+        return current.mapNotNull { row ->
+            val before = previousById[row.componentId] ?: return@mapNotNull null
+            if (before.health == row.health) return@mapNotNull null
+            AlertEvent(
+                componentId = row.componentId,
+                componentLabel = row.componentId,
+                fromHealth = before.health,
+                toHealth = row.health,
+                timestampMs = now,
+            )
+        }
+    }
+
+    private fun recordAlerts(alerts: List<AlertEvent>) {
+        if (alerts.isEmpty()) return
+        _uiState.update { it.copy(alerts = (alerts + it.alerts).take(AlertHistoryStore.MAX_HISTORY)) }
+        viewModelScope.launch { alertHistoryStore.append(alerts) }
+    }
 
     fun start(target: String) {
         if (target.isBlank()) return
@@ -179,7 +220,9 @@ class VitalsViewModel @Inject constructor(
                         val description = _uiState.value.description ?: RobotVitalsMapper.fallbackRobotDescription()
                         val hardware = RobotVitalsMapper.snapshotToHardware(snapshot, description)
                         if (healthGate.accept(componentHealthKey(hardware.componentHealth))) {
+                            val previous = acceptedHealthRows
                             acceptedHealthRows = hardware.componentHealth
+                            recordAlerts(diffHealthRows(previous, hardware.componentHealth))
                         }
                         val rows = acceptedHealthRows
                         _uiState.update {
@@ -376,6 +419,7 @@ fun VitalsScreen(
             hardware = hardware,
             modules = state.modules,
             providers = state.providers,
+            alerts = state.alerts,
             viewModel = viewModel,
         )
     }
@@ -391,6 +435,7 @@ private fun VitalsBody(
     hardware: HardwareSnapshot?,
     modules: List<ModuleHealth>,
     providers: List<ProviderInfo>,
+    alerts: List<AlertEvent>,
     viewModel: VitalsViewModel,
 ) {
     LazyColumn(
@@ -406,6 +451,9 @@ private fun VitalsBody(
         }
         if (modules.isNotEmpty() || providers.isNotEmpty()) {
             item { SoftwarePanel(modules, providers) { viewModel.select(it) } }
+        }
+        if (alerts.isNotEmpty()) {
+            item { AlertsCard(alerts) }
         }
         item { Spacer(Modifier.height(32.dp)) }
     }
@@ -603,6 +651,42 @@ private fun SignalsCard(hardware: HardwareSnapshot) {
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(tStatus(signal.visualState), color = stateColor(signal.visualState), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AlertsCard(alerts: List<AlertEvent>) {
+    CyberCard(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp)) {
+            Text(t("vitals.alert.title"), color = Text, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            alerts.sortedByDescending { it.timestampMs }.forEach { alert ->
+                val isRecovery = severityOf(alert.toHealth) < severityOf(alert.fromHealth)
+                val lineColor = if (isRecovery) Green else stateColor(alert.toHealth)
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        if (isRecovery) Icons.Default.CheckCircle else Icons.Default.ErrorOutline,
+                        null, tint = lineColor, modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        alert.componentLabel.ifBlank { alert.componentId },
+                        color = Muted, fontSize = 11.sp, modifier = Modifier.weight(1f),
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    val statusText = if (isRecovery) {
+                        t("vitals.alert.recovered")
+                    } else {
+                        "${tStatus(alert.fromHealth)}→${tStatus(alert.toHealth)}"
+                    }
+                    Text(statusText, color = lineColor, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }

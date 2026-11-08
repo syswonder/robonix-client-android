@@ -1,5 +1,8 @@
 package com.robonix.client.ui.perception
 
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -31,6 +34,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -49,6 +53,53 @@ fun PerceptionScreen(
     viewModel: PerceptionViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
+    var showExportChoices by remember { mutableStateOf(false) }
+    val documentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { uri ->
+        viewModel.finishDocumentSnapshot(uri)
+    }
+    BackHandler(enabled = state.selectedChannel != 0) { viewModel.selectChannel(0) }
+    val exportChannel: (Int) -> Unit = { channel ->
+        viewModel.beginSnapshot(channel)?.let { filename ->
+            try {
+                documentLauncher.launch(filename)
+            } catch (_: Exception) {
+                viewModel.snapshotPickerFailed()
+            }
+        }
+    }
+    val exportSnapshot: () -> Unit = snapshot@{
+        if (state.isExportingSnapshot) return@snapshot
+        val selected = state.selectedChannel
+        if (selected == 0) {
+            if ((1..3).none { viewModel.snapshotBitmap(it) != null }) {
+                viewModel.reportSnapshotResult(false, unavailable = true)
+            } else {
+                showExportChoices = true
+            }
+        } else {
+            exportChannel(selected)
+        }
+    }
+
+    if (showExportChoices) {
+        AlertDialog(
+            onDismissRequest = { showExportChoices = false },
+            title = { Text(t("perception.snapshot.choose")) },
+            text = {
+                Column {
+                    listOf(1 to "perception.tab.camera", 2 to "perception.tab.depth", 3 to "perception.tab.map").forEach { (channel, label) ->
+                        TextButton(
+                            onClick = { showExportChoices = false; exportChannel(channel) },
+                            enabled = viewModel.snapshotBitmap(channel) != null,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        ) { Text(t(label)) }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { showExportChoices = false }) { Text(t("perception.snapshot.cancel")) } },
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -62,7 +113,7 @@ fun PerceptionScreen(
             onSelectChannel = { viewModel.selectChannel(it) },
             onTogglePause = { viewModel.togglePause() },
             onRefresh = { viewModel.restartLivePoll() },
-            onSnapshot = { viewModel.triggerSnapshot() },
+            onSnapshot = exportSnapshot,
         )
 
         Spacer(Modifier.height(8.dp))
@@ -73,10 +124,11 @@ fun PerceptionScreen(
             enter = fadeIn() + expandVertically(),
             exit = fadeOut() + shrinkVertically(),
         ) {
+            val noticeColor = if (state.snapshotNotice == "SNAPSHOT_FAILED" || state.snapshotNotice == "SNAPSHOT_UNAVAILABLE") Amber else Green
             Surface(
-                color = Green.copy(alpha = 0.15f),
+                color = noticeColor.copy(alpha = 0.15f),
                 shape = RoundedCornerShape(8.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Green.copy(alpha = 0.4f)),
+                border = androidx.compose.foundation.BorderStroke(1.dp, noticeColor.copy(alpha = 0.4f)),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 6.dp),
@@ -85,9 +137,24 @@ fun PerceptionScreen(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(Icons.Default.CheckCircle, null, tint = Green, modifier = Modifier.size(15.dp))
+                    Icon(
+                        if (state.snapshotNotice == "SNAPSHOT_FAILED" || state.snapshotNotice == "SNAPSHOT_UNAVAILABLE") Icons.Default.ErrorOutline else Icons.Default.CheckCircle,
+                        null,
+                        tint = if (state.snapshotNotice == "SNAPSHOT_FAILED" || state.snapshotNotice == "SNAPSHOT_UNAVAILABLE") Amber else Green,
+                        modifier = Modifier.size(15.dp),
+                    )
                     Spacer(Modifier.width(8.dp))
-                    Text(t("perception.snapshot.saved"), color = Text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        when (state.snapshotNotice) {
+                            "SNAPSHOT_DOCUMENT_SAVED" -> t("perception.snapshot.documentSaved")
+                            "SNAPSHOT_FAILED" -> t("perception.snapshot.failed")
+                            "SNAPSHOT_UNAVAILABLE" -> t("perception.snapshot.unavailable")
+                            else -> t("perception.snapshot.saved")
+                        },
+                        color = if (state.snapshotNotice == "SNAPSHOT_FAILED") Amber else Text,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
                 }
             }
         }
@@ -150,7 +217,7 @@ private fun PerceptionTopBar(
                 )
                 Spacer(Modifier.width(7.dp))
                 Text(
-                    "空间感知",
+                    t("perception.header.title"),
                     color = Text,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
@@ -173,43 +240,63 @@ private fun PerceptionTopBar(
                         color = Muted,
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
                     )
                 }
 
+                // IconButton's default minimumInteractiveComponentSize keeps each
+                // tap target at 48dp even though the visible chip stays compact.
                 IconButton(
                     onClick = onTogglePause,
-                    modifier = Modifier
-                        .size(28.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(if (state.isPaused) Amber.copy(alpha = 0.2f) else Panel2),
+                    modifier = Modifier.size(48.dp),
                 ) {
-                    Icon(
-                        if (state.isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
-                        contentDescription = "Toggle Live",
-                        tint = if (state.isPaused) Amber else Green,
-                        modifier = Modifier.size(15.dp),
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (state.isPaused) Amber.copy(alpha = 0.2f) else Panel2),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            if (state.isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                            contentDescription = "Toggle Live",
+                            tint = if (state.isPaused) Amber else Green,
+                            modifier = Modifier.size(15.dp),
+                        )
+                    }
                 }
 
                 IconButton(
                     onClick = onRefresh,
-                    modifier = Modifier
-                        .size(28.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Panel2),
+                    modifier = Modifier.size(48.dp),
                 ) {
-                    Icon(Icons.Default.Refresh, "Refresh", tint = Cyan, modifier = Modifier.size(14.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Panel2),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Default.Refresh, "Refresh", tint = Cyan, modifier = Modifier.size(14.dp))
+                    }
                 }
 
                 IconButton(
                     onClick = onSnapshot,
-                    modifier = Modifier
-                        .size(28.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Panel2),
+                    enabled = !state.isExportingSnapshot,
+                    modifier = Modifier.size(48.dp),
                 ) {
-                    Icon(Icons.Default.CameraAlt, t("perception.snapshot"), tint = Text, modifier = Modifier.size(14.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Panel2),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Default.CameraAlt, t("perception.snapshot"), tint = Text, modifier = Modifier.size(14.dp))
+                    }
                 }
             }
         }
@@ -258,6 +345,7 @@ private fun PerceptionTopBar(
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                             color = if (isSelected) Cyan else Muted,
                             maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
@@ -398,15 +486,24 @@ private fun CameraTile(
                 )
 
                 if (isExpanded && onBack != null) {
+                    // 48dp tap target (via IconButton's own size) around the
+                    // same compact 24dp visual chip, so the back/collapse
+                    // action meets the touch-target minimum on narrow screens.
                     IconButton(
                         onClick = onBack,
                         modifier = Modifier
-                            .padding(6.dp)
-                            .size(24.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Panel.copy(alpha = 0.85f)),
+                            .padding(4.dp)
+                            .size(48.dp),
                     ) {
-                        Icon(Icons.Default.FullscreenExit, "Collapse", tint = Cyan, modifier = Modifier.size(15.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Panel.copy(alpha = 0.85f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(Icons.Default.FullscreenExit, "Collapse", tint = Cyan, modifier = Modifier.size(15.dp))
+                        }
                     }
                 } else if (!isExpanded) {
                     Icon(
@@ -546,15 +643,24 @@ private fun DepthTile(
                 )
 
                 if (isExpanded && onBack != null) {
+                    // 48dp tap target (via IconButton's own size) around the
+                    // same compact 24dp visual chip, so the back/collapse
+                    // action meets the touch-target minimum on narrow screens.
                     IconButton(
                         onClick = onBack,
                         modifier = Modifier
-                            .padding(6.dp)
-                            .size(24.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Panel.copy(alpha = 0.85f)),
+                            .padding(4.dp)
+                            .size(48.dp),
                     ) {
-                        Icon(Icons.Default.FullscreenExit, "Collapse", tint = Cyan, modifier = Modifier.size(15.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Panel.copy(alpha = 0.85f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(Icons.Default.FullscreenExit, "Collapse", tint = Cyan, modifier = Modifier.size(15.dp))
+                        }
                     }
                 } else if (!isExpanded) {
                     Icon(
@@ -876,15 +982,24 @@ private fun SceneMapTile(
                 )
 
                 if (isExpanded && onBack != null) {
+                    // 48dp tap target (via IconButton's own size) around the
+                    // same compact 24dp visual chip, so the back/collapse
+                    // action meets the touch-target minimum on narrow screens.
                     IconButton(
                         onClick = onBack,
                         modifier = Modifier
-                            .padding(6.dp)
-                            .size(24.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Panel.copy(alpha = 0.85f)),
+                            .padding(4.dp)
+                            .size(48.dp),
                     ) {
-                        Icon(Icons.Default.FullscreenExit, "Collapse", tint = Cyan, modifier = Modifier.size(15.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Panel.copy(alpha = 0.85f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(Icons.Default.FullscreenExit, "Collapse", tint = Cyan, modifier = Modifier.size(15.dp))
+                        }
                     }
                 } else if (!isExpanded) {
                     Icon(
@@ -935,11 +1050,11 @@ private fun SceneMapView(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 val layers = state.sceneLayers
-                LayerPill(label = "地图", active = layers.map, onClick = { onToggleLayer("map") }, modifier = Modifier.weight(1f))
-                LayerPill(label = "区域", active = layers.regions, onClick = { onToggleLayer("regions") }, modifier = Modifier.weight(1f))
-                LayerPill(label = "目标", active = layers.objects, onClick = { onToggleLayer("objects") }, modifier = Modifier.weight(1f))
-                LayerPill(label = "机器人", active = layers.robot, onClick = { onToggleLayer("robot") }, modifier = Modifier.weight(1f))
-                LayerPill(label = "雷达", active = layers.lidar, onClick = { onToggleLayer("lidar") }, modifier = Modifier.weight(1f))
+                LayerPill(label = t("perception.layer.map"), active = layers.map, onClick = { onToggleLayer("map") }, modifier = Modifier.weight(1f))
+                LayerPill(label = t("perception.layer.regions"), active = layers.regions, onClick = { onToggleLayer("regions") }, modifier = Modifier.weight(1f))
+                LayerPill(label = t("perception.layer.objects"), active = layers.objects, onClick = { onToggleLayer("objects") }, modifier = Modifier.weight(1f))
+                LayerPill(label = t("perception.layer.robot"), active = layers.robot, onClick = { onToggleLayer("robot") }, modifier = Modifier.weight(1f))
+                LayerPill(label = t("perception.layer.lidar"), active = layers.lidar, onClick = { onToggleLayer("lidar") }, modifier = Modifier.weight(1f))
             }
         }
     }
@@ -952,23 +1067,32 @@ private fun LayerPill(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Clickable area meets the 48dp touch-target minimum even though the
+    // visible pill stays compact at 26dp.
     Box(
         modifier = modifier
-            .height(26.dp)
-            .clip(RoundedCornerShape(4.dp))
-            .background(if (active) Cyan.copy(alpha = 0.18f) else Panel2)
-            .then(
-                if (active) Modifier.border(0.8.dp, Cyan.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
-                else Modifier.border(0.6.dp, LineSoft, RoundedCornerShape(4.dp))
-            )
+            .heightIn(min = 48.dp)
             .clickable { onClick() },
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            label,
-            color = if (active) Cyan else Muted,
-            fontSize = 11.sp,
-            fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(26.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(if (active) Cyan.copy(alpha = 0.18f) else Panel2)
+                .then(
+                    if (active) Modifier.border(0.8.dp, Cyan.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                    else Modifier.border(0.6.dp, LineSoft, RoundedCornerShape(4.dp))
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                label,
+                color = if (active) Cyan else Muted,
+                fontSize = 11.sp,
+                fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+            )
+        }
     }
 }

@@ -9,6 +9,7 @@ import com.robonix.client.data.model.RtdlNodeState
 import com.robonix.client.data.model.RtdlPlan
 import com.robonix.client.data.model.SessionStatus
 import com.robonix.client.data.model.TaskState
+import com.robonix.client.data.model.TaskSummary
 import com.robonix.client.data.model.HandsfreeStatus
 import com.robonix.client.data.model.VoiceEvent
 import com.robonix.proto.liaison.FinishVoiceCapture_Request
@@ -361,6 +362,18 @@ class LiaisonClient @Inject constructor(
                 goal = event.taskState.goal,
                 successCriterion = event.taskState.successCriterion,
                 status = event.taskState.status,
+                taskId = event.taskState.taskId,
+                tasks = event.taskState.tasksList.map { s ->
+                    TaskSummary(
+                        taskId = s.taskId,
+                        goal = s.goal,
+                        successCriterion = s.successCriterion,
+                        status = s.status,
+                        statusReason = s.statusReason,
+                        messageIds = s.messageIdsList,
+                        planIds = s.planIdsList,
+                    )
+                },
             ) else null,
             status = if (event.hasStatus()) SessionStatus(
                 sessionId = event.status.sessionId,
@@ -436,6 +449,7 @@ class LiaisonClient @Inject constructor(
         val stateNames = mapOf(
             0 to "PENDING", 1 to "RUNNING", 2 to "SUCCEEDED",
             3 to "FAILED", 4 to "CANCELED", 5 to "TIMEOUT", 6 to "PAUSED",
+            7 to "VERIFYING",
         )
         return RtdlNodeState(
             nodeIndex = state.nodeIndex,

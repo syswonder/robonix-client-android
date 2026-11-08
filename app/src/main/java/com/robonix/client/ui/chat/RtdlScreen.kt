@@ -6,6 +6,11 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -42,8 +47,11 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -69,6 +77,8 @@ data class RtdlUiState(
     val livePlan: RtdlPlan? = null,
     val liveNodeStates: Map<Int, RtdlNodeState> = emptyMap(),
     val error: String? = null,
+    val taskState: TaskState? = null,
+    val selectedTaskId: String? = null,
 )
 
 @HiltViewModel
@@ -80,6 +90,21 @@ class RtdlViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(RtdlUiState())
     val uiState: StateFlow<RtdlUiState> = _uiState.asStateFlow()
 
+    /** Filtered plan records based on selected task's planIds when tasks.size > 1. */
+    val filteredPlanRecords: StateFlow<List<PlanRecord>> = _uiState.map { state ->
+        val tasks = state.taskState?.tasks ?: emptyList()
+        if (tasks.size <= 1) return@map state.planRecords
+
+        val effectiveTaskId = state.selectedTaskId ?: tasks.lastOrNull()?.taskId
+        if (effectiveTaskId == null) return@map state.planRecords
+
+        val selectedTask = tasks.find { it.taskId == effectiveTaskId }
+        val allowedPlanIds = selectedTask?.planIds?.toSet() ?: emptySet()
+        if (allowedPlanIds.isEmpty()) return@map emptyList()
+
+        state.planRecords.filter { it.plan.planId in allowedPlanIds }
+    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
     private var pollJob: Job? = null
 
     init {
@@ -89,6 +114,18 @@ class RtdlViewModel @Inject constructor(
         }
         viewModelScope.launch {
             rtdlState.liveNodeStates.collect { ns -> _uiState.update { it.copy(liveNodeStates = ns) } }
+        }
+        viewModelScope.launch {
+            rtdlState.taskState.collect { ts -> _uiState.update { it.copy(taskState = ts) } }
+        }
+        viewModelScope.launch {
+            rtdlState.selectedTaskId.collect { id ->
+                _uiState.update { state ->
+                    // Reset record index to 0 when task selection changes,
+                    // since the filtered list changes and old index may be out of bounds
+                    state.copy(selectedTaskId = id, selectedRecordIndex = 0)
+                }
+            }
         }
         viewModelScope.launch {
             rtdlState.planRecords.collect { recs ->
@@ -163,6 +200,10 @@ class RtdlViewModel @Inject constructor(
             state.copy(expandedNodeIndices = set)
         }
     }
+
+    fun selectTask(taskId: String?) {
+        rtdlState.selectTask(taskId)
+    }
 }
 
 @Composable
@@ -171,6 +212,7 @@ fun RtdlScreen(
     sharedViewModel: SharedViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
+    val filteredRecords by viewModel.filteredPlanRecords.collectAsState()
     val settings by sharedViewModel.settings.collectAsState()
 
     LaunchedEffect(settings.atlasEndpoint) {
@@ -193,7 +235,7 @@ fun RtdlScreen(
         RtdlTopBar(
             selectedTab = state.selectedTab,
             activeCount = state.executorPlans.size,
-            historyCount = state.planRecords.size,
+            historyCount = filteredRecords.size,
             isRefreshing = state.isRefreshing,
             onSelectTab = { viewModel.selectTab(it) },
             onRefresh = { viewModel.refresh(settings.atlasEndpoint) },
@@ -212,8 +254,10 @@ fun RtdlScreen(
                 0 -> ActivePlansSection(state = state)
                 1 -> BehaviorTreeSection(
                     state = state,
+                    filteredRecords = filteredRecords,
                     onSelectRecord = { viewModel.selectRecordIndex(it) },
                     onToggleNode = { viewModel.toggleNodeExpanded(it) },
+                    onSelectTask = { viewModel.selectTask(it) },
                 )
             }
         }
@@ -321,7 +365,7 @@ private fun ActivePlansSection(state: RtdlUiState) {
     if (state.executorPlans.isEmpty()) {
         RtdlEmptyState(
             title = t("rtdl.active.empty"),
-            subtitle = "当前后端执行器空闲，待命接收导航、操作与感知任务",
+            subtitle = t("rtdl.active.empty.desc"),
             icon = Icons.Default.DoneAll,
         )
         return
@@ -360,7 +404,7 @@ private fun ExecutorPlanCyberCard(plan: ExecutorPlan) {
                     )
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        text = "ID: ${plan.planId} · 共 ${plan.opCount} 个算子",
+                        text = t("rtdl.plan.meta", plan.planId, plan.opCount),
                         color = Dim,
                         fontSize = 10.5.sp,
                         fontFamily = FontFamily.Monospace,
@@ -380,7 +424,7 @@ private fun ExecutorPlanCyberCard(plan: ExecutorPlan) {
                             Spacer(Modifier.width(5.dp))
                         }
                         Text(
-                            text = if (plan.cancelled) "已取消" else "执行中",
+                            text = if (plan.cancelled) tStatus("CANCELED") else tStatus("RUNNING"),
                             color = if (plan.cancelled) Red else Green,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
@@ -494,18 +538,20 @@ private fun ExecutorOpRow(index: Int, op: ExecutorOp) {
 @Composable
 private fun BehaviorTreeSection(
     state: RtdlUiState,
+    filteredRecords: List<PlanRecord>,
     onSelectRecord: (Int) -> Unit,
     onToggleNode: (Int) -> Unit,
+    onSelectTask: (String?) -> Unit,
 ) {
-    // Current active plan from record list or live plan
-    val selectedRecord = state.planRecords.getOrNull(state.selectedRecordIndex)
+    // Current active plan from filtered record list or live plan
+    val selectedRecord = filteredRecords.getOrNull(state.selectedRecordIndex)
     val plan = selectedRecord?.plan ?: state.livePlan
     val nodeStates = selectedRecord?.nodeStates ?: state.liveNodeStates
 
     if (plan == null || plan.nodes.isEmpty()) {
         RtdlEmptyState(
             title = t("rtdl.history.empty"),
-            subtitle = "对话产生任务后，此处将自动绘制完整的 RTDL 行为决策树",
+            subtitle = t("rtdl.history.empty.desc"),
             icon = Icons.Default.AccountTree,
         )
         return
@@ -520,25 +566,73 @@ private fun BehaviorTreeSection(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // Record Selector Chips (if multiple rounds exist)
-        if (state.planRecords.size > 1) {
+        // Task Selector Chips (only when multiple tasks exist)
+        val tasks = state.taskState?.tasks ?: emptyList()
+        if (tasks.size > 1) {
             item {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .selectableGroup()
                         .padding(bottom = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    state.planRecords.forEachIndexed { i, record ->
+                    tasks.forEachIndexed { i, task ->
+                        val isSelected = when {
+                            state.selectedTaskId != null -> state.selectedTaskId == task.taskId
+                            else -> i == tasks.size - 1 // follow-latest mode: last task is selected
+                        }
+                        Surface(
+                            color = if (isSelected) Amber.copy(alpha = 0.2f) else Panel2,
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, if (isSelected) Amber else LineSoft),
+                            modifier = Modifier.selectable(
+                                selected = isSelected,
+                                role = Role.RadioButton,
+                                onClick = { onSelectTask(if (i == tasks.size - 1) null else task.taskId) },
+                            ),
+                        ) {
+                            Text(
+                                text = task.goal.take(20).ifBlank { task.taskId.take(8) },
+                                color = if (isSelected) Amber else Text,
+                                fontSize = 11.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Record Selector Chips (if multiple rounds exist)
+        if (filteredRecords.size > 1) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .selectableGroup()
+                        .padding(bottom = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    filteredRecords.forEachIndexed { i, record ->
                         val isSelected = i == state.selectedRecordIndex
                         Surface(
                             color = if (isSelected) Cyan.copy(alpha = 0.2f) else Panel2,
                             shape = RoundedCornerShape(12.dp),
                             border = BorderStroke(1.dp, if (isSelected) Cyan else LineSoft),
-                            modifier = Modifier.clickable { onSelectRecord(i) },
+                            modifier = Modifier.selectable(
+                                selected = isSelected,
+                                role = Role.RadioButton,
+                                onClick = { onSelectRecord(i) },
+                            ),
                         ) {
                             Text(
-                                text = "第 ${record.plan.round} 轮 (${record.plan.nodes.size} 节点)",
+                                text = t("rtdl.record", record.plan.round, record.plan.nodes.size),
                                 color = if (isSelected) Cyan else Text,
                                 fontSize = 11.sp,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
@@ -568,6 +662,65 @@ private fun BehaviorTreeSection(
     }
 }
 
+/**
+ * Aggregates a leaf-less (composite) node's status from its children,
+ * matching the web client's computeAggregateNodeStatus: own result wins if
+ * present; otherwise failed > running > (all succeeded) > pending.
+ * Iterative post-order over an explicit stack — no recursion, no
+ * StackOverflowError on deep/cyclic-looking trees.
+ */
+private fun aggregateNodeStatuses(
+    plan: RtdlPlan,
+    nodeStates: Map<Int, RtdlNodeState>,
+): Map<Int, String> {
+    val nodes = plan.nodes
+    if (nodes.isEmpty()) return emptyMap()
+    val byIndex = nodes.associateBy { it.index }
+    val resolved = mutableMapOf<Int, String>()
+
+    // Iterative post-order: push (node, visitedChildren=false); on first visit
+    // push self again as visitedChildren=true then push children; on second
+    // visit all children are already resolved.
+    data class Frame(val index: Int, val childrenPushed: Boolean)
+    val stack = ArrayDeque<Frame>()
+    val visiting = mutableSetOf<Int>()
+    nodes.forEach { stack.add(Frame(it.index, false)) }
+
+    while (stack.isNotEmpty()) {
+        val frame = stack.removeLast()
+        if (resolved.containsKey(frame.index)) continue
+        val node = byIndex[frame.index] ?: continue
+
+        if (!frame.childrenPushed) {
+            if (!visiting.add(frame.index)) continue // cycle guard
+            stack.add(Frame(frame.index, true))
+            node.children.forEach { childIdx ->
+                if (childIdx in byIndex && !resolved.containsKey(childIdx)) {
+                    stack.add(Frame(childIdx, false))
+                }
+            }
+            continue
+        }
+
+        val own = nodeStates[node.index]?.state
+        resolved[node.index] = when {
+            !own.isNullOrBlank() -> own
+            else -> {
+                val childStatuses = node.children.mapNotNull { resolved[it] ?: byIndex[it]?.let { "PENDING" } }
+                when {
+                    childStatuses.isEmpty() -> "PENDING"
+                    childStatuses.any { it in listOf("FAILED", "ERROR") } -> "FAILED"
+                    childStatuses.any { it in listOf("RUNNING", "VERIFYING") } -> "RUNNING"
+                    childStatuses.all { it == "SUCCEEDED" } -> "SUCCEEDED"
+                    else -> "PENDING"
+                }
+            }
+        }
+    }
+
+    return resolved
+}
+
 /** Pure, non-recursive traversal helper that guarantees no StackOverflowError. */
 private fun flattenPlanTree(
     plan: RtdlPlan,
@@ -578,6 +731,7 @@ private fun flattenPlanTree(
 
     val byIndex = nodes.associateBy { it.index }
     val childSet = nodes.flatMap { it.children }.toSet()
+    val aggregatedStatus = aggregateNodeStatuses(plan, nodeStates)
 
     // Find root nodes
     val roots = mutableListOf<RtdlNode>()
@@ -602,8 +756,12 @@ private fun flattenPlanTree(
         if (!visited.add(node.index)) continue
 
         val state = nodeStates[node.index]
-        val status = state?.state ?: "PENDING"
         val hasChildren = node.children.any { it in byIndex }
+        // Leaves use their own reported state; composite (non-leaf) nodes with
+        // no reported state of their own are aggregated from their children so
+        // a parent shows FAILED/RUNNING as soon as any child does, instead of
+        // sitting on PENDING for the whole round (web client parity).
+        val status = state?.state ?: if (hasChildren) aggregatedStatus[node.index] ?: "PENDING" else "PENDING"
 
         result.add(
             FlattenedTreeNode(
@@ -630,10 +788,14 @@ private fun BehaviorTreeSummaryCard(
     plan: RtdlPlan,
     nodeStates: Map<Int, RtdlNodeState>,
 ) {
+    // Use the same aggregation as the tree rows so parent composite nodes
+    // count toward running/failed instead of sitting counted as pending.
+    val aggregated = remember(plan, nodeStates) { aggregateNodeStatuses(plan, nodeStates) }
+    fun statusOf(index: Int) = nodeStates[index]?.state ?: aggregated[index]
     val total = plan.nodes.size
-    val succeeded = plan.nodes.count { nodeStates[it.index]?.state == "SUCCEEDED" }
-    val running = plan.nodes.count { nodeStates[it.index]?.state == "RUNNING" }
-    val failed = plan.nodes.count { nodeStates[it.index]?.state in listOf("FAILED", "ERROR") }
+    val succeeded = plan.nodes.count { statusOf(it.index) == "SUCCEEDED" }
+    val running = plan.nodes.count { statusOf(it.index) in listOf("RUNNING", "VERIFYING") }
+    val failed = plan.nodes.count { statusOf(it.index) in listOf("FAILED", "ERROR") }
 
     CyberCard(
         modifier = Modifier.fillMaxWidth(),
@@ -649,7 +811,7 @@ private fun BehaviorTreeSummaryCard(
                     Icon(Icons.Default.AccountTree, null, tint = Cyan, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        text = "计划 ID: ${plan.planId.take(16)}",
+                        text = t("rtdl.plan.id", plan.planId.take(16)),
                         color = Text,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
@@ -661,7 +823,7 @@ private fun BehaviorTreeSummaryCard(
                     border = BorderStroke(0.8.dp, Cyan.copy(alpha = 0.4f)),
                 ) {
                     Text(
-                        text = "第 ${plan.round} 轮",
+                        text = t("rtdl.round", plan.round),
                         color = Cyan,
                         fontSize = 10.5.sp,
                         fontWeight = FontWeight.Bold,
@@ -679,14 +841,14 @@ private fun BehaviorTreeSummaryCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "$succeeded / $total 节点已完成",
+                    text = t("rtdl.nodes.completed", succeeded, total),
                     color = Muted,
                     fontSize = 11.sp,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (running > 0) MetricTag(count = running, label = "运行中", color = Amber)
-                    if (succeeded > 0) MetricTag(count = succeeded, label = "成功", color = Green)
-                    if (failed > 0) MetricTag(count = failed, label = "失败", color = Red)
+                    if (running > 0) MetricTag(count = running, label = tStatus("RUNNING"), color = Amber)
+                    if (succeeded > 0) MetricTag(count = succeeded, label = tStatus("SUCCEEDED"), color = Green)
+                    if (failed > 0) MetricTag(count = failed, label = tStatus("FAILED"), color = Red)
                 }
             }
 
@@ -740,7 +902,7 @@ private fun FlattenedNodeCard(
 ) {
     val node = item.node
     val status = item.status.uppercase()
-    val isRunning = status in listOf("RUNNING", "ACTIVE")
+    val isRunning = status in listOf("RUNNING", "ACTIVE", "VERIFYING")
     val isSucceeded = status in listOf("SUCCEEDED", "SUCCESS")
     val isFailed = status in listOf("FAILED", "ERROR", "TIMEOUT")
 
@@ -852,7 +1014,7 @@ private fun FlattenedNodeCard(
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
                             Text(
-                                text = "类型: ${node.kind}",
+                                text = t("rtdl.node.kind", node.kind),
                                 color = Dim,
                                 fontSize = 10.sp,
                             )
@@ -870,7 +1032,7 @@ private fun FlattenedNodeCard(
                         if (node.call != null && node.call.args.isNotEmpty()) {
                             Spacer(Modifier.height(6.dp))
                             Text(
-                                text = "调用参数 (Args):",
+                                text = t("rtdl.call.args"),
                                 color = Muted,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.SemiBold,
@@ -889,7 +1051,7 @@ private fun FlattenedNodeCard(
                             val res = item.stateObj.leafResult
                             Spacer(Modifier.height(6.dp))
                             Text(
-                                text = "执行结果 (Result · ${if (res.success) "成功" else "失败"}):",
+                                text = t("rtdl.call.result", if (res.success) t("common.success") else t("common.failed")),
                                 color = if (res.success) Green else Red,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.SemiBold,

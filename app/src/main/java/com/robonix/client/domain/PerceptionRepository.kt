@@ -665,6 +665,36 @@ class PerceptionRepository @Inject constructor(
             }
         }
 
+        if (regions.isEmpty() && caps.sceneRegions != null) {
+            try {
+                val contract = caps.sceneRegions
+                val res = mcpCall(atlasEndpoint, contract, contract.substringAfterLast("/"))
+                val arr = res.optJSONArray("regions") ?: res.optJSONObject("regions")?.optJSONArray("regions")
+                if (arr != null) {
+                    for (i in 0 until arr.length()) {
+                        val r = arr.optJSONObject(i) ?: continue
+                        val ptsArr = r.optJSONArray("points_xy")
+                        val pts = mutableListOf<Offset>()
+                        if (ptsArr != null && ptsArr.length() >= 6) {
+                            for (j in 0 until ptsArr.length() - 1 step 2) {
+                                pts.add(Offset(ptsArr.optDouble(j, 0.0).toFloat(), ptsArr.optDouble(j + 1, 0.0).toFloat()))
+                            }
+                        }
+                        regions.add(
+                            SceneRegion(
+                                name = r.optString("name", r.optString("id", "Region $i")),
+                                kind = r.optString("kind", "room"),
+                                colorHex = r.optString("color", "#35e0a0"),
+                                points = pts,
+                            )
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                if (isNoProviderError(e)) capabilityCache.remove(atlasEndpoint)
+            }
+        }
+
         return SceneResult(robotPose, objects, regions)
     }
 

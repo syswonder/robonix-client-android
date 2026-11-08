@@ -4,6 +4,7 @@ import android.util.Log
 import com.robonix.client.data.model.BatchResult
 import com.robonix.client.data.model.RtdlNodeState
 import com.robonix.client.data.model.RtdlPlan
+import com.robonix.client.data.model.TaskState
 import com.robonix.client.ui.chat.PlanRecord
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,11 +35,23 @@ class RtdlStateHolder @Inject constructor() {
     private val _planVersion = MutableStateFlow(0L)
     val planVersion: StateFlow<Long> = _planVersion.asStateFlow()
 
+    /** null = follow the latest task; non-null pins the view to that task id. */
+    private val _selectedTaskId = MutableStateFlow<String?>(null)
+    val selectedTaskId: StateFlow<String?> = _selectedTaskId.asStateFlow()
+
+    private val _taskState = MutableStateFlow<TaskState?>(null)
+    val taskState: StateFlow<TaskState?> = _taskState.asStateFlow()
+
+    fun selectTask(taskId: String?) {
+        _selectedTaskId.value = taskId
+    }
+
     fun update(
         plan: RtdlPlan?,
         nodeStates: Map<Int, RtdlNodeState>,
         batches: List<BatchResult>,
         records: List<PlanRecord>,
+        taskState: TaskState? = null,
     ) {
         Log.w("RobonixRtdl", "RtdlStateHolder.update: plan=${plan?.planId} nodes=${plan?.nodes?.size} " +
             "nodeStates=${nodeStates.size} batches=${batches.size} records=${records.size}")
@@ -47,6 +60,7 @@ class RtdlStateHolder @Inject constructor() {
         _liveBatches.value = batches
         if (records.size > _planRecords.value.size) _planVersion.value += 1
         _planRecords.value = records
+        _taskState.value = taskState
     }
 
     fun clear() {
@@ -54,5 +68,7 @@ class RtdlStateHolder @Inject constructor() {
         _liveNodeStates.value = emptyMap()
         _liveBatches.value = emptyList()
         _planRecords.value = emptyList()
+        _selectedTaskId.value = null
+        _taskState.value = null
     }
 }
