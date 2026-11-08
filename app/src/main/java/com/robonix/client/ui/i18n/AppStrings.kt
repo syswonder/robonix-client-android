@@ -82,6 +82,14 @@ object AppStrings {
         "rtdl.node.status" to "Status",
         "rtdl.node.args" to "Arguments",
         "rtdl.node.result" to "Result",
+        "rtdl.view.canvas" to "Graph View",
+        "rtdl.view.list" to "List View",
+        "rtdl.btn.focus_active" to "Focus Active",
+        "rtdl.btn.fit_view" to "Reset View",
+        "rtdl.nav.parent" to "Parent Node",
+        "rtdl.nav.children" to "Child Nodes",
+        "rtdl.empty.args" to "No parameters required",
+        "rtdl.empty.result" to "No return payload",
 
         // audio
         "audio.route.title" to "Robonix Audio Route",
@@ -410,6 +418,14 @@ object AppStrings {
         "rtdl.node.status" to "状态",
         "rtdl.node.args" to "参数",
         "rtdl.node.result" to "结果",
+        "rtdl.view.canvas" to "拓扑图",
+        "rtdl.view.list" to "清单",
+        "rtdl.btn.focus_active" to "聚焦活跃",
+        "rtdl.btn.fit_view" to "自适应",
+        "rtdl.nav.parent" to "父节点",
+        "rtdl.nav.children" to "子节点",
+        "rtdl.empty.args" to "无入参要求",
+        "rtdl.empty.result" to "无返回数据",
 
         // audio
         "audio.route.title" to "音频路由",

@@ -17,6 +17,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.AltRoute
+import androidx.compose.material.icons.automirrored.filled.CallSplit
+import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -36,6 +38,7 @@ import androidx.lifecycle.viewModelScope
 import com.robonix.client.data.model.*
 import com.robonix.client.domain.RtdlStateHolder
 import com.robonix.client.domain.SystemRepository
+import com.robonix.client.ui.chat.rtdl.*
 import com.robonix.client.ui.components.CodeBlockView
 import com.robonix.client.ui.components.CyberCard
 import com.robonix.client.ui.components.PulsingStatusDot
@@ -543,6 +546,9 @@ private fun BehaviorTreeSection(
     onToggleNode: (Int) -> Unit,
     onSelectTask: (String?) -> Unit,
 ) {
+    var inspectedNodeIndex by remember { mutableStateOf<Int?>(null) }
+    var viewMode by remember { mutableIntStateOf(0) } // 0 = 动态拓扑图 (Canvas), 1 = 紧凑清单 (List)
+
     // Current active plan from filtered record list or live plan
     val selectedRecord = filteredRecords.getOrNull(state.selectedRecordIndex)
     val plan = selectedRecord?.plan ?: state.livePlan
@@ -557,52 +563,46 @@ private fun BehaviorTreeSection(
         return
     }
 
-    // Safely flatten the behavior tree into non-recursive linear items
-    val flattenedNodes = remember(plan, nodeStates) {
-        flattenPlanTree(plan, nodeStates)
+    val layoutResult = remember(plan, nodeStates) {
+        TreeLayoutEngine.computeLayout(plan, nodeStates)
     }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
+    Column(modifier = Modifier.fillMaxSize()) {
         // Task Selector Chips (only when multiple tasks exist)
         val tasks = state.taskState?.tasks ?: emptyList()
         if (tasks.size > 1) {
-            item {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .selectableGroup()
-                        .padding(bottom = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    tasks.forEachIndexed { i, task ->
-                        val isSelected = when {
-                            state.selectedTaskId != null -> state.selectedTaskId == task.taskId
-                            else -> i == tasks.size - 1 // follow-latest mode: last task is selected
-                        }
-                        Surface(
-                            color = if (isSelected) Amber.copy(alpha = 0.2f) else Panel2,
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(1.dp, if (isSelected) Amber else LineSoft),
-                            modifier = Modifier.selectable(
-                                selected = isSelected,
-                                role = Role.RadioButton,
-                                onClick = { onSelectTask(if (i == tasks.size - 1) null else task.taskId) },
-                            ),
-                        ) {
-                            Text(
-                                text = task.goal.take(20).ifBlank { task.taskId.take(8) },
-                                color = if (isSelected) Amber else Text,
-                                fontSize = 11.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                            )
-                        }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .selectableGroup()
+                    .padding(bottom = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                tasks.forEachIndexed { i, task ->
+                    val isSelected = when {
+                        state.selectedTaskId != null -> state.selectedTaskId == task.taskId
+                        else -> i == tasks.size - 1 // follow-latest mode: last task is selected
+                    }
+                    Surface(
+                        color = if (isSelected) Amber.copy(alpha = 0.2f) else Panel2,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, if (isSelected) Amber else LineSoft),
+                        modifier = Modifier.selectable(
+                            selected = isSelected,
+                            role = Role.RadioButton,
+                            onClick = { onSelectTask(if (i == tasks.size - 1) null else task.taskId) },
+                        ),
+                    ) {
+                        Text(
+                            text = task.goal.take(20).ifBlank { task.taskId.take(8) },
+                            color = if (isSelected) Amber else Text,
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
                     }
                 }
             }
@@ -610,55 +610,96 @@ private fun BehaviorTreeSection(
 
         // Record Selector Chips (if multiple rounds exist)
         if (filteredRecords.size > 1) {
-            item {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .selectableGroup()
-                        .padding(bottom = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    filteredRecords.forEachIndexed { i, record ->
-                        val isSelected = i == state.selectedRecordIndex
-                        Surface(
-                            color = if (isSelected) Cyan.copy(alpha = 0.2f) else Panel2,
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(1.dp, if (isSelected) Cyan else LineSoft),
-                            modifier = Modifier.selectable(
-                                selected = isSelected,
-                                role = Role.RadioButton,
-                                onClick = { onSelectRecord(i) },
-                            ),
-                        ) {
-                            Text(
-                                text = t("rtdl.record", record.plan.round, record.plan.nodes.size),
-                                color = if (isSelected) Cyan else Text,
-                                fontSize = 11.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                            )
-                        }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .selectableGroup()
+                    .padding(bottom = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                filteredRecords.forEachIndexed { i, record ->
+                    val isSelected = i == state.selectedRecordIndex
+                    Surface(
+                        color = if (isSelected) Cyan.copy(alpha = 0.2f) else Panel2,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, if (isSelected) Cyan else LineSoft),
+                        modifier = Modifier.selectable(
+                            selected = isSelected,
+                            role = Role.RadioButton,
+                            onClick = { onSelectRecord(i) },
+                        ),
+                    ) {
+                        Text(
+                            text = t("rtdl.record", record.plan.round, record.plan.nodes.size),
+                            color = if (isSelected) Cyan else Text,
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        )
                     }
                 }
             }
         }
 
-        // Summary Card
-        item {
-            BehaviorTreeSummaryCard(plan = plan, nodeStates = nodeStates)
-        }
+        // Summary Card with View Mode Switch
+        BehaviorTreeSummaryCard(
+            plan = plan,
+            nodeStates = nodeStates,
+            viewMode = viewMode,
+            onToggleViewMode = { viewMode = it },
+        )
 
-        // Flattened Node Items
-        items(flattenedNodes, key = { it.node.index }) { item ->
-            FlattenedNodeCard(
-                item = item,
-                isExpanded = state.expandedNodeIndices.contains(item.node.index),
-                onToggleExpand = { onToggleNode(item.node.index) },
-            )
-        }
+        Spacer(Modifier.height(8.dp))
 
-        item { Spacer(Modifier.height(16.dp)) }
+        // Content Area: Canvas or Linear List
+        if (viewMode == 0) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+            ) {
+                RtdlCanvasView(
+                    plan = plan,
+                    nodeStates = nodeStates,
+                    selectedNodeIndex = inspectedNodeIndex,
+                    onNodeClick = { node ->
+                        inspectedNodeIndex = node.node.index
+                    },
+                )
+            }
+        } else {
+            val flattenedNodes = remember(plan, nodeStates) {
+                flattenPlanTree(plan, nodeStates)
+            }
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(flattenedNodes, key = { it.node.index }) { item ->
+                    FlattenedNodeCard(
+                        item = item,
+                        isExpanded = state.expandedNodeIndices.contains(item.node.index),
+                        onToggleExpand = { onToggleNode(item.node.index) },
+                    )
+                }
+                item { Spacer(Modifier.height(16.dp)) }
+            }
+        }
+    }
+
+    // Modal Bottom Sheet Detail Inspector
+    if (inspectedNodeIndex != null) {
+        val selectedLayoutNode = layoutResult.nodes.find { it.node.index == inspectedNodeIndex }
+        val nodesMap = remember(layoutResult) { layoutResult.nodes.associateBy { it.node.index } }
+        RtdlNodeDetailSheet(
+            layoutNode = selectedLayoutNode,
+            allNodesByIndex = nodesMap,
+            onDismiss = { inspectedNodeIndex = null },
+            onSelectNode = { inspectedNodeIndex = it },
+        )
     }
 }
 
@@ -787,6 +828,8 @@ private fun flattenPlanTree(
 private fun BehaviorTreeSummaryCard(
     plan: RtdlPlan,
     nodeStates: Map<Int, RtdlNodeState>,
+    viewMode: Int,
+    onToggleViewMode: (Int) -> Unit,
 ) {
     // Use the same aggregation as the tree rows so parent composite nodes
     // count toward running/failed instead of sitting counted as pending.
@@ -807,7 +850,10 @@ private fun BehaviorTreeSummaryCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.weight(1f, fill = false),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     Icon(Icons.Default.AccountTree, null, tint = Cyan, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))
                     Text(
@@ -815,20 +861,88 @@ private fun BehaviorTreeSummaryCard(
                         color = Text,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Surface(
-                    color = Cyan.copy(alpha = 0.12f),
-                    shape = RoundedCornerShape(10.dp),
-                    border = BorderStroke(0.8.dp, Cyan.copy(alpha = 0.4f)),
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Text(
-                        text = t("rtdl.round", plan.round),
-                        color = Cyan,
-                        fontSize = 10.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                    )
+                    // View Mode Toggle (Canvas vs List)
+                    Surface(
+                        color = Panel2,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(0.8.dp, LineSoft),
+                    ) {
+                        Row(modifier = Modifier.padding(2.dp)) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (viewMode == 0) Cyan.copy(alpha = 0.2f) else Color.Transparent)
+                                    .clickable { onToggleViewMode(0) }
+                                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.AccountTree,
+                                        contentDescription = null,
+                                        tint = if (viewMode == 0) Cyan else Dim,
+                                        modifier = Modifier.size(12.dp),
+                                    )
+                                    Spacer(Modifier.width(3.dp))
+                                    Text(
+                                        text = t("rtdl.view.canvas"),
+                                        color = if (viewMode == 0) Cyan else Dim,
+                                        fontSize = 10.sp,
+                                        fontWeight = if (viewMode == 0) FontWeight.Bold else FontWeight.Normal,
+                                    )
+                                }
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (viewMode == 1) Cyan.copy(alpha = 0.2f) else Color.Transparent)
+                                    .clickable { onToggleViewMode(1) }
+                                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.FormatListBulleted,
+                                        contentDescription = null,
+                                        tint = if (viewMode == 1) Cyan else Dim,
+                                        modifier = Modifier.size(12.dp),
+                                    )
+                                    Spacer(Modifier.width(3.dp))
+                                    Text(
+                                        text = t("rtdl.view.list"),
+                                        color = if (viewMode == 1) Cyan else Dim,
+                                        fontSize = 10.sp,
+                                        fontWeight = if (viewMode == 1) FontWeight.Bold else FontWeight.Normal,
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Round Pill
+                    Surface(
+                        color = Cyan.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(0.8.dp, Cyan.copy(alpha = 0.4f)),
+                    ) {
+                        Text(
+                            text = t("rtdl.round", plan.round),
+                            color = Cyan,
+                            fontSize = 10.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                        )
+                    }
                 }
             }
 
@@ -916,7 +1030,7 @@ private fun FlattenedNodeCard(
     val nodeIcon = when (node.kind.lowercase()) {
         "action" -> Icons.Default.PlayArrow
         "sequence" -> Icons.AutoMirrored.Filled.AltRoute
-        "fallback", "selector" -> Icons.Default.CallSplit
+        "fallback", "selector" -> Icons.AutoMirrored.Filled.CallSplit
         "condition" -> Icons.Default.CheckCircleOutline
         else -> Icons.Default.Lens
     }
