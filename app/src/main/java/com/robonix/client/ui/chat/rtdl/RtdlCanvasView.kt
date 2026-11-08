@@ -154,15 +154,27 @@ fun RtdlCanvasView(
                     cubicTo(x0, ctrlY0, x1, ctrlY1, x1, y1)
                 }
 
-                // Base connector line
-                val strokeWidth = if (edge.isActivePath) 2.dp.toPx() else 1.2.dp.toPx()
-                val strokeColor = if (edge.isActivePath) Amber.copy(alpha = 0.75f) else Line.copy(alpha = 0.45f)
-
-                drawPath(
-                    path = path,
-                    color = strokeColor,
-                    style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
-                )
+                // Connector line
+                if (edge.isActivePath) {
+                    // Glowing aura under active line
+                    drawPath(
+                        path = path,
+                        color = Amber.copy(alpha = 0.25f),
+                        style = Stroke(width = 6.dp.toPx(), cap = StrokeCap.Round),
+                    )
+                    drawPath(
+                        path = path,
+                        color = Amber,
+                        style = Stroke(width = 2.6.dp.toPx(), cap = StrokeCap.Round),
+                    )
+                } else {
+                    // Crisp, high-contrast cyber connector line
+                    drawPath(
+                        path = path,
+                        color = Cyan.copy(alpha = 0.55f),
+                        style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round),
+                    )
+                }
 
                 // Energy Pulse Animation along Active Paths
                 if (edge.isActivePath) {
@@ -321,3 +333,4 @@ fun RtdlCanvasView(
         }
     }
 }
+
