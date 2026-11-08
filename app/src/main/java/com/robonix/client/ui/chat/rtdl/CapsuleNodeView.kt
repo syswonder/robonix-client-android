@@ -44,9 +44,11 @@ fun CapsuleNodeView(
 ) {
     val node = layoutNode.node
     val status = layoutNode.status.uppercase()
+    val leafSuccess = layoutNode.stateObj?.leafResult?.success
     val isRunning = status in listOf("RUNNING", "ACTIVE", "VERIFYING")
-    val isSucceeded = status in listOf("SUCCEEDED", "SUCCESS")
-    val isFailed = status in listOf("FAILED", "ERROR", "TIMEOUT")
+    val isFailed = status in listOf("FAILED", "ERROR", "TIMEOUT", "CANCELED", "CANCELLED", "ABORTED") ||
+        (leafSuccess == false)
+    val isSucceeded = !isFailed && (status in listOf("SUCCEEDED", "SUCCESS") || leafSuccess == true)
 
     // Breathing glow animation for running nodes
     val infiniteTransition = rememberInfiniteTransition(label = "nodeGlow")

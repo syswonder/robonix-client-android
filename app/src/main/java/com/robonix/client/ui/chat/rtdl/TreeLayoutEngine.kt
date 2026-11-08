@@ -85,7 +85,7 @@ object TreeLayoutEngine {
                 } else {
                     val childStatuses = children.map { resolved[it] ?: "PENDING" }
                     resolved[idx] = when {
-                        childStatuses.any { it in listOf("FAILED", "ERROR") } -> "FAILED"
+                        childStatuses.any { it in listOf("FAILED", "ERROR", "TIMEOUT", "CANCELED", "CANCELLED", "ABORTED") } -> "FAILED"
                         childStatuses.any { it in listOf("RUNNING", "ACTIVE", "VERIFYING") } -> "RUNNING"
                         childStatuses.all { it in listOf("SUCCEEDED", "SUCCESS") } -> "SUCCEEDED"
                         else -> "PENDING"

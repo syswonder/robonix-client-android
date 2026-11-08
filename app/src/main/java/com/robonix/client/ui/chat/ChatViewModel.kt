@@ -690,6 +690,7 @@ class ChatViewModel @Inject constructor(
                 planRecordsJson = PlanHistoryCodec.encodeRecords(s.planRecords),
                 batchesJson = PlanHistoryCodec.encodeBatches(s.batches),
                 nodeStatesJson = PlanHistoryCodec.encodeStates(s.nodeStates),
+                taskStateJson = s.taskState?.let(PlanHistoryCodec::encodeTaskState),
             )
 
             _sessions.value = conversationStore.upsert(conv, revision)
@@ -749,6 +750,7 @@ class ChatViewModel @Inject constructor(
         planRecords = PlanHistoryCodec.decodeRecords(target.planRecordsJson),
         batches = PlanHistoryCodec.decodeBatches(target.batchesJson),
         nodeStates = PlanHistoryCodec.decodeStates(target.nodeStatesJson),
+        taskState = PlanHistoryCodec.decodeTaskState(target.taskStateJson),
     )
 
     private fun handlePilotEvent(event: PilotEvent) {
@@ -831,8 +833,9 @@ class ChatViewModel @Inject constructor(
                         activePilotSessionId = if (isRunning) event.sessionId.ifBlank { state.activePilotSessionId } else state.activePilotSessionId,
                     )
                 }
+                pushRtdlToShared()
                 addTimeline(createTimelineEvent("status", AppStrings.formatStatus(_uiState.value.settings.language, ts.status)))
-                autoPersistIfTerminal(st)
+                persistCurrentConversation()
             }
             "status" -> event.status?.message?.let { msg ->
                 val m = Regex("^turn_id=(.+)$").find(msg)

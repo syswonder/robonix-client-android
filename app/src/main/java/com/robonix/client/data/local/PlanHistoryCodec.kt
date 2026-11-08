@@ -92,4 +92,51 @@ internal object PlanHistoryCodec {
         PlanRecord("${p.planId}:${p.round}", p, decodeStates(r.optString("nodeStates", "{}")),
             decodeBatches(r.optString("batches", "[]")), r.optLong("updatedAt", 0))
     }
+
+    fun encodeTaskState(state: TaskState): String = obj(
+        "goal" to state.goal,
+        "successCriterion" to state.successCriterion,
+        "status" to state.status,
+        "taskId" to state.taskId,
+        "tasks" to array(state.tasks.map { t ->
+            obj(
+                "taskId" to t.taskId,
+                "goal" to t.goal,
+                "successCriterion" to t.successCriterion,
+                "status" to t.status,
+                "statusReason" to t.statusReason,
+                "planIds" to array(t.planIds),
+            )
+        }),
+    ).toString()
+
+    fun decodeTaskState(json: String?): TaskState? = json?.let {
+        runCatching {
+            val o = JSONObject(it)
+            val tasksArr = o.optJSONArray("tasks") ?: JSONArray()
+            val tasks = (0 until tasksArr.length()).mapNotNull { i ->
+                runCatching {
+                    val t = tasksArr.getJSONObject(i)
+                    val planIdsArr = t.optJSONArray("planIds") ?: JSONArray()
+                    val planIds = (0 until planIdsArr.length()).map { pIdx -> planIdsArr.getString(pIdx) }
+                    TaskSummary(
+                        taskId = t.getString("taskId"),
+                        goal = t.optString("goal", ""),
+                        successCriterion = t.optString("successCriterion", ""),
+                        status = t.optString("status", ""),
+                        statusReason = t.optString("statusReason", ""),
+                        messageIds = emptyList(),
+                        planIds = planIds,
+                    )
+                }.getOrNull()
+            }
+            TaskState(
+                goal = o.optString("goal", ""),
+                successCriterion = o.optString("successCriterion", ""),
+                status = o.optString("status", ""),
+                taskId = o.optString("taskId", ""),
+                tasks = tasks,
+            )
+        }.getOrNull()
+    }
 }

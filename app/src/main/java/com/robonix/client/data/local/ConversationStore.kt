@@ -24,6 +24,7 @@ data class Conversation(
     val planRecordsJson: String = "[]",
     val batchesJson: String = "[]",
     val nodeStatesJson: String = "{}",
+    val taskStateJson: String? = null,
 )
 
 @Singleton
@@ -56,6 +57,8 @@ class ConversationStore @Inject constructor(
                 planJson = obj.optString("plan", "null").takeIf { it != "null" },
                 planRecordsJson = obj.optString("planRecords", "[]"), batchesJson = obj.optString("batches", "[]"),
                 nodeStatesJson = obj.optString("nodeStates", "{}"),
+                taskStateJson = obj.optJSONObject("taskState")?.toString()
+                    ?: if (obj.has("taskStateJson") && !obj.isNull("taskStateJson")) obj.getString("taskStateJson") else null,
             )
         }.getOrNull() }.filter { it.id.isNotBlank() }.sortedByDescending { it.updatedAt }
     } catch (_: java.io.FileNotFoundException) {
@@ -76,6 +79,7 @@ class ConversationStore @Inject constructor(
                 put("planRecords", runCatching { JSONArray(c.planRecordsJson) }.getOrElse { JSONArray() })
                 put("batches", runCatching { JSONArray(c.batchesJson) }.getOrElse { JSONArray() })
                 put("nodeStates", runCatching { JSONObject(c.nodeStatesJson) }.getOrElse { JSONObject() })
+                c.taskStateJson?.let { put("taskState", runCatching { JSONObject(it) }.getOrNull()) }
             })
         }
         val atomic = file

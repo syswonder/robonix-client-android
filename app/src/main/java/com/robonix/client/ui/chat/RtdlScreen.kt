@@ -13,6 +13,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.FormatListNumbered
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Refresh
@@ -211,64 +212,94 @@ private fun BehaviorTreeSection(
     var showTaskSheet by remember { mutableStateOf(false) }
     var showRoundSheet by remember { mutableStateOf(false) }
 
+    val tasks = state.taskState?.tasks ?: emptyList()
+    val currentTask = tasks.find { it.taskId == state.selectedTaskId }
+        ?: tasks.lastOrNull()
+
     val currentIndex = if (filteredRecords.isNotEmpty()) {
         state.selectedRecordIndex.coerceIn(0, filteredRecords.size - 1)
     } else 0
 
     val selectedRecord = filteredRecords.getOrNull(currentIndex)
-    val plan = selectedRecord?.plan ?: state.livePlan
-    val nodeStates = selectedRecord?.nodeStates ?: state.liveNodeStates
 
-    if (plan == null || plan.nodes.isEmpty()) {
-        RtdlEmptyState(
-            title = t("rtdl.history.empty"),
-            subtitle = t("rtdl.history.empty.desc"),
-            icon = Icons.Default.AccountTree,
-        )
-        return
+    // Check if the currently viewed task has any plan records
+    // If a specific task is selected and has 0 plan records (e.g. Task #1),
+    // it MUST NOT fall back to state.livePlan which belongs to a different task!
+    val isViewingLatestOrLiveTask = state.selectedTaskId == null ||
+        state.selectedTaskId == (state.taskState?.taskId ?: tasks.lastOrNull()?.taskId)
+
+    val plan: RtdlPlan? = when {
+        selectedRecord != null -> selectedRecord.plan
+        filteredRecords.isNotEmpty() -> filteredRecords.first().plan
+        tasks.isEmpty() -> state.livePlan
+        isViewingLatestOrLiveTask && currentTask?.planIds?.contains(state.livePlan?.planId) == true -> state.livePlan
+        else -> null
+    }
+
+    val nodeStates: Map<Int, RtdlNodeState> = when {
+        selectedRecord != null -> selectedRecord.nodeStates
+        plan != null && isViewingLatestOrLiveTask -> state.liveNodeStates
+        else -> emptyMap()
     }
 
     val layoutResult = remember(plan, nodeStates) {
-        TreeLayoutEngine.computeLayout(plan, nodeStates)
+        if (plan != null && plan.nodes.isNotEmpty()) {
+            TreeLayoutEngine.computeLayout(plan, nodeStates)
+        } else null
     }
 
-    val tasks = state.taskState?.tasks ?: emptyList()
-    val currentTask = tasks.find { it.taskId == state.selectedTaskId }
-        ?: tasks.lastOrNull()
-
     Column(modifier = modifier) {
-        // Plan A: Unified Control Header (Task Dropdown + Round Stepper + Metrics)
-        RtdlControlHeader(
+        // Top Header: Task Selector Pill + Mini Progress Tag + Refresh Button
+        RtdlTaskHeader(
             tasks = tasks,
             currentTask = currentTask,
             overallGoal = state.taskState?.goal,
-            filteredRecords = filteredRecords,
-            selectedRecordIndex = currentIndex,
-            isRefreshing = isRefreshing,
             plan = plan,
             nodeStates = nodeStates,
+            isRefreshing = isRefreshing,
             onOpenTaskSheet = { showTaskSheet = true },
-            onOpenRoundSheet = { showRoundSheet = true },
-            onSelectRecord = onSelectRecord,
             onRefresh = onRefresh,
         )
 
         Spacer(Modifier.height(8.dp))
 
-        // Dynamic Interactive Canvas (Edge-to-edge, serial status-colored pipeline)
+        // Center: Interactive Canvas or Empty State + Floating Round Directory
         Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
         ) {
-            RtdlCanvasView(
-                plan = plan,
-                nodeStates = nodeStates,
-                selectedNodeIndex = inspectedNodeIndex,
-                onNodeClick = { node ->
-                    inspectedNodeIndex = node.node.index
-                },
-            )
+            if (plan == null || plan.nodes.isEmpty()) {
+                RtdlEmptyState(
+                    title = if (currentTask != null) "该任务暂无 RTDL 计划" else t("rtdl.history.empty"),
+                    subtitle = if (currentTask != null) "此任务为纯文本对话交互，未生成行为树执行计划" else t("rtdl.history.empty.desc"),
+                    icon = Icons.Default.AccountTree,
+                )
+            } else {
+                RtdlCanvasView(
+                    plan = plan,
+                    nodeStates = nodeStates,
+                    selectedNodeIndex = inspectedNodeIndex,
+                    onNodeClick = { node ->
+                        inspectedNodeIndex = node.node.index
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+
+                // Floating Round Catalog / Stepper docked at bottom center ("轮次放在中间下面，而不是上面，就像目录一样")
+                if (filteredRecords.isNotEmpty()) {
+                    RtdlBottomRoundDirectory(
+                        filteredRecords = filteredRecords,
+                        selectedRecordIndex = currentIndex,
+                        plan = plan,
+                        onSelectRecord = onSelectRecord,
+                        onOpenRoundSheet = { showRoundSheet = true },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 12.dp),
+                    )
+                }
+            }
         }
     }
 
@@ -283,7 +314,7 @@ private fun BehaviorTreeSection(
     }
 
     // Modal Round Picker Sheet
-    if (showRoundSheet && filteredRecords.isNotEmpty()) {
+    if (showRoundSheet && filteredRecords.isNotEmpty() && plan != null) {
         RoundPickerSheet(
             records = filteredRecords,
             selectedRecordIndex = currentIndex,
@@ -293,7 +324,7 @@ private fun BehaviorTreeSection(
     }
 
     // Modal Bottom Sheet Detail Inspector
-    if (inspectedNodeIndex != null) {
+    if (inspectedNodeIndex != null && layoutResult != null) {
         val selectedLayoutNode = layoutResult.nodes.find { it.node.index == inspectedNodeIndex }
         val nodesMap = remember(layoutResult) { layoutResult.nodes.associateBy { it.node.index } }
         RtdlNodeDetailSheet(
@@ -306,101 +337,100 @@ private fun BehaviorTreeSection(
 }
 
 /**
- * Plan A: Unified Cockpit Control Header
- * Line 1: Task Dropdown Pill + Node Progress + Refresh
- * Line 2: Playback Stepper (Prev < | Round ▾ | Next >) + Live/Latest Tag
- * Bottom: Hairline Progress Line
+ * Top Task Header: Focused strictly on task switching and overall status.
  */
 @Composable
-private fun RtdlControlHeader(
+private fun RtdlTaskHeader(
     tasks: List<TaskSummary>,
     currentTask: TaskSummary?,
     overallGoal: String? = null,
-    filteredRecords: List<PlanRecord>,
-    selectedRecordIndex: Int,
-    isRefreshing: Boolean,
-    plan: RtdlPlan,
+    plan: RtdlPlan?,
     nodeStates: Map<Int, RtdlNodeState>,
+    isRefreshing: Boolean,
     onOpenTaskSheet: () -> Unit,
-    onOpenRoundSheet: () -> Unit,
-    onSelectRecord: (Int) -> Unit,
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val isTaskRunning = currentTask?.status?.lowercase() in listOf("running", "active", "executing")
-    val isTaskFailed = currentTask?.status?.lowercase() in listOf("failed", "error")
+    val isTaskFailed = currentTask?.status?.lowercase() in listOf("failed", "error", "canceled", "cancelled", "aborted")
 
-    val aggregated = remember(plan, nodeStates) { TreeLayoutEngine.aggregateNodeStatuses(plan, nodeStates) }
+    val aggregated = remember(plan, nodeStates) {
+        if (plan != null) TreeLayoutEngine.aggregateNodeStatuses(plan, nodeStates) else emptyMap()
+    }
     fun statusOf(index: Int) = nodeStates[index]?.state ?: aggregated[index]
-    val total = plan.nodes.size
-    val succeeded = plan.nodes.count { statusOf(it.index) == "SUCCEEDED" }
-    val running = plan.nodes.count { statusOf(it.index) in listOf("RUNNING", "VERIFYING") }
-    val failed = plan.nodes.count { statusOf(it.index) in listOf("FAILED", "ERROR") }
+    val total = plan?.nodes?.size ?: 0
+    val succeeded = plan?.nodes?.count { statusOf(it.index) == "SUCCEEDED" } ?: 0
+    val running = plan?.nodes?.count { statusOf(it.index) in listOf("RUNNING", "VERIFYING") } ?: 0
+    val failed = plan?.nodes?.count { statusOf(it.index) in listOf("FAILED", "ERROR", "TIMEOUT", "CANCELED", "CANCELLED", "ABORTED") } ?: 0
 
     CyberCard(
         modifier = modifier.fillMaxWidth(),
         borderColor = if (isTaskRunning) Amber.copy(alpha = 0.45f) else LineSoft,
     ) {
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
-            // Line 1: Task Selector Pill (Left) + Stats & Refresh (Right)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            // Task Dropdown Pill
+            Surface(
+                color = if (isTaskRunning) Amber.copy(alpha = 0.14f) else Panel2,
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(
+                    width = 1.dp,
+                    color = if (isTaskRunning) Amber.copy(alpha = 0.5f) else LineSoft,
+                ),
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(enabled = tasks.size > 1) { onOpenTaskSheet() },
             ) {
-                // Task Dropdown Pill
-                Surface(
-                    color = if (isTaskRunning) Amber.copy(alpha = 0.14f) else Panel2,
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(
-                        width = 1.dp,
-                        color = if (isTaskRunning) Amber.copy(alpha = 0.5f) else LineSoft,
-                    ),
-                    modifier = Modifier
-                        .weight(1f, fill = false)
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable(enabled = tasks.size > 1) { onOpenTaskSheet() },
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        PulsingStatusDot(
-                            color = if (isTaskRunning) Amber else if (isTaskFailed) Red else Green,
-                            size = 6.dp,
+                    PulsingStatusDot(
+                        color = if (isTaskRunning) Amber else if (isTaskFailed) Red else Green,
+                        size = 6.dp,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    val taskIndex = if (tasks.isNotEmpty() && currentTask != null) tasks.indexOf(currentTask) + 1 else 0
+                    val taskPrefix = if (tasks.size > 1 && taskIndex > 0) "#$taskIndex " else ""
+                    val rawTitle = currentTask?.goal?.take(20)?.ifBlank { null }
+                        ?: overallGoal?.take(20)?.ifBlank { null }
+                        ?: if (taskIndex > 0) "任务 #$taskIndex" else "当前任务"
+                    val taskTitle = "$taskPrefix$rawTitle"
+                    Text(
+                        text = taskTitle,
+                        color = Text,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (tasks.size > 1) {
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            imageVector = Icons.Default.ArrowDropDown,
+                            contentDescription = "选择任务",
+                            tint = Cyan,
+                            modifier = Modifier.size(16.dp),
                         )
-                        Spacer(Modifier.width(6.dp))
-                        val taskTitle = currentTask?.goal?.take(22)?.ifBlank { null }
-                            ?: overallGoal?.take(22)?.ifBlank { null }
-                            ?: if (tasks.isNotEmpty()) "任务 #${tasks.indexOf(currentTask) + 1}" else "当前任务"
-                        Text(
-                            text = taskTitle,
-                            color = Text,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        if (tasks.size > 1) {
-                            Spacer(Modifier.width(4.dp))
-                            Icon(
-                                imageVector = Icons.Default.ArrowDropDown,
-                                contentDescription = "Select Task",
-                                tint = Cyan,
-                                modifier = Modifier.size(16.dp),
-                            )
-                        }
                     }
                 }
+            }
 
-                Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(8.dp))
 
-                // Stats & Refresh
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    // Mini node progress tag
+            // Stats & Refresh
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (total > 0) {
                     Surface(
                         color = Panel2,
                         shape = RoundedCornerShape(8.dp),
@@ -431,153 +461,169 @@ private fun RtdlControlHeader(
                             )
                         }
                     }
+                }
 
-                    // Refresh Button
-                    IconButton(
-                        onClick = onRefresh,
-                        modifier = Modifier.size(28.dp),
-                        enabled = !isRefreshing,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = t("action.refresh"),
-                            tint = if (isRefreshing) Amber else Cyan,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    }
+                IconButton(
+                    onClick = onRefresh,
+                    modifier = Modifier.size(28.dp),
+                    enabled = !isRefreshing,
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = t("action.refresh"),
+                        tint = if (isRefreshing) Amber else Cyan,
+                        modifier = Modifier.size(16.dp),
+                    )
                 }
             }
+        }
+    }
+}
 
-            Spacer(Modifier.height(8.dp))
+/**
+ * Bottom Floating Round Directory & Playback Stepper ("轮次放在中间下面，而不是上面，就像目录一样")
+ */
+@Composable
+private fun RtdlBottomRoundDirectory(
+    filteredRecords: List<PlanRecord>,
+    selectedRecordIndex: Int,
+    plan: RtdlPlan,
+    onSelectRecord: (Int) -> Unit,
+    onOpenRoundSheet: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val totalRounds = filteredRecords.size.coerceAtLeast(1)
+    val displayRound = if (plan.round > 0) plan.round else (filteredRecords.size - selectedRecordIndex).coerceAtLeast(1)
+    val isLatest = selectedRecordIndex == 0
+    val canGoPrev = selectedRecordIndex < filteredRecords.size - 1
+    val canGoNext = selectedRecordIndex > 0
 
-            // Line 2: Playback Stepper (Prev < | Round ▾ | Next >) + Live Button
-            val totalRounds = filteredRecords.size.coerceAtLeast(1)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
+    Surface(
+        color = Panel.copy(alpha = 0.94f),
+        shape = RoundedCornerShape(22.dp),
+        border = BorderStroke(1.dp, LineSoft),
+        shadowElevation = 8.dp,
+        modifier = modifier
+            .padding(horizontal = 16.dp)
+            .wrapContentSize(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            // Previous round button
+            IconButton(
+                onClick = { if (canGoPrev) onSelectRecord(selectedRecordIndex + 1) },
+                enabled = canGoPrev,
+                modifier = Modifier.size(30.dp),
             ) {
-                // Stepper Group
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                    contentDescription = "上一轮",
+                    tint = if (canGoPrev) Cyan else Dim.copy(alpha = 0.3f),
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+
+            // Catalog / Round Pill (Tap to open full directory)
+            Surface(
+                color = Panel2,
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(0.8.dp, Cyan.copy(alpha = 0.45f)),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onOpenRoundSheet() },
+            ) {
                 Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    val canGoPrev = selectedRecordIndex < filteredRecords.size - 1
-                    IconButton(
-                        onClick = { if (canGoPrev) onSelectRecord(selectedRecordIndex + 1) },
-                        enabled = canGoPrev,
-                        modifier = Modifier.size(28.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                            contentDescription = "Previous Round",
-                            tint = if (canGoPrev) Cyan else Dim.copy(alpha = 0.35f),
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
-
-                    // Round Dropdown Pill
-                    Surface(
-                        color = Panel2,
-                        shape = RoundedCornerShape(10.dp),
-                        border = BorderStroke(0.8.dp, Cyan.copy(alpha = 0.4f)),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .clickable(enabled = filteredRecords.size > 1) { onOpenRoundSheet() },
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                text = "第 ${plan.round} 轮 / 共 $totalRounds 轮",
-                                color = Cyan,
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.Bold,
-                            )
-                            if (filteredRecords.size > 1) {
-                                Spacer(Modifier.width(4.dp))
-                                Icon(
-                                    imageVector = Icons.Default.ArrowDropDown,
-                                    contentDescription = "Pick Round",
-                                    tint = Cyan,
-                                    modifier = Modifier.size(14.dp),
-                                )
-                            }
-                        }
-                    }
-
-                    val canGoNext = selectedRecordIndex > 0
-                    IconButton(
-                        onClick = { if (canGoNext) onSelectRecord(selectedRecordIndex - 1) },
-                        enabled = canGoNext,
-                        modifier = Modifier.size(28.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                            contentDescription = "Next Round",
-                            tint = if (canGoNext) Cyan else Dim.copy(alpha = 0.35f),
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
-                }
-
-                // Live / Return to Latest Pill
-                val isLatest = selectedRecordIndex == 0
-                Surface(
-                    color = if (isLatest) Cyan.copy(alpha = 0.16f) else Panel2,
-                    shape = RoundedCornerShape(10.dp),
-                    border = BorderStroke(
-                        width = 1.dp,
-                        color = if (isLatest) Cyan.copy(alpha = 0.5f) else LineSoft,
-                    ),
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .clickable { if (!isLatest) onSelectRecord(0) },
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (isLatest) {
-                            PulsingStatusDot(color = Cyan, size = 5.dp)
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                text = "实时",
-                                color = Cyan,
-                                fontSize = 10.5.sp,
-                                fontWeight = FontWeight.Bold,
-                            )
-                        } else {
-                            Text(
-                                text = "回到最新",
-                                color = Amber,
-                                fontSize = 10.5.sp,
-                                fontWeight = FontWeight.Bold,
-                            )
-                        }
-                    }
+                    Icon(
+                        imageVector = Icons.Default.FormatListNumbered,
+                        contentDescription = "目录",
+                        tint = Cyan,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "第 $displayRound 轮 / 共 $totalRounds 轮",
+                        color = Cyan,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        imageVector = Icons.Default.ArrowDropDown,
+                        contentDescription = "打开轮次目录",
+                        tint = Cyan,
+                        modifier = Modifier.size(15.dp),
+                    )
                 }
             }
 
-            Spacer(Modifier.height(6.dp))
+            // Next round button
+            IconButton(
+                onClick = { if (canGoNext) onSelectRecord(selectedRecordIndex - 1) },
+                enabled = canGoNext,
+                modifier = Modifier.size(30.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = "下一轮",
+                    tint = if (canGoNext) Cyan else Dim.copy(alpha = 0.3f),
+                    modifier = Modifier.size(18.dp),
+                )
+            }
 
-            // Hairline Progress Line
-            val progress = if (total > 0) succeeded.toFloat() / total.toFloat() else 0f
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(2.5.dp)
-                    .clip(RoundedCornerShape(1.dp))
-                    .background(Panel2),
+                    .height(16.dp)
+                    .width(1.dp)
+                    .background(LineSoft),
+            )
+
+            // Live / Return to latest button
+            Surface(
+                color = if (isLatest) Green.copy(alpha = 0.14f) else Amber.copy(alpha = 0.16f),
+                shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(
+                    0.8.dp,
+                    if (isLatest) Green.copy(alpha = 0.4f) else Amber.copy(alpha = 0.5f),
+                ),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(enabled = !isLatest) { onSelectRecord(0) },
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(fraction = progress.coerceIn(0f, 1f))
-                        .fillMaxHeight()
-                        .clip(RoundedCornerShape(1.dp))
-                        .background(if (failed > 0) Red else if (running > 0) Amber else Cyan),
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (isLatest) {
+                        PulsingStatusDot(color = Green, size = 5.dp)
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = "实时",
+                            color = Green,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "回到最新",
+                            tint = Amber,
+                            modifier = Modifier.size(12.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = "最新",
+                            color = Amber,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
             }
         }
     }
@@ -634,13 +680,15 @@ private fun TaskPickerSheet(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.verticalScroll(rememberScrollState()),
             ) {
-                tasks.forEachIndexed { i, task ->
+                val reversedTasksWithIndex = tasks.mapIndexed { index, task -> index to task }.reversed()
+                reversedTasksWithIndex.forEach { (originalIndex, task) ->
+                    val isLatest = originalIndex == tasks.size - 1
                     val isSelected = when {
                         selectedTaskId != null -> selectedTaskId == task.taskId
-                        else -> i == tasks.size - 1
+                        else -> isLatest
                     }
                     val isRunning = task.status.lowercase() in listOf("running", "active", "executing")
-                    val isFailed = task.status.lowercase() in listOf("failed", "error")
+                    val isFailed = task.status.lowercase() in listOf("failed", "error", "canceled", "cancelled", "aborted")
 
                     Surface(
                         color = if (isSelected) Amber.copy(alpha = 0.12f) else Panel2,
@@ -652,7 +700,7 @@ private fun TaskPickerSheet(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable {
-                                onSelectTask(if (i == tasks.size - 1) null else task.taskId)
+                                onSelectTask(task.taskId)
                                 onDismiss()
                             },
                     ) {
@@ -671,7 +719,7 @@ private fun TaskPickerSheet(
                                     )
                                     Spacer(Modifier.width(6.dp))
                                     Text(
-                                        text = "任务 #${i + 1}",
+                                        text = "任务 #${originalIndex + 1}" + if (isLatest) " (最新)" else "",
                                         color = if (isSelected) Amber else Cyan,
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold,
@@ -694,14 +742,43 @@ private fun TaskPickerSheet(
                                 )
                             }
 
-                            if (isSelected) {
-                                Spacer(Modifier.width(8.dp))
-                                Icon(
-                                    imageVector = Icons.Default.Check,
-                                    contentDescription = null,
-                                    tint = Amber,
-                                    modifier = Modifier.size(18.dp),
-                                )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Surface(
+                                    color = when {
+                                        isRunning -> Amber.copy(alpha = 0.16f)
+                                        isFailed -> Red.copy(alpha = 0.16f)
+                                        else -> Green.copy(alpha = 0.14f)
+                                    },
+                                    shape = RoundedCornerShape(6.dp),
+                                ) {
+                                    Text(
+                                        text = when {
+                                            isRunning -> "运行中"
+                                            isFailed -> "失败"
+                                            else -> "已完成"
+                                        },
+                                        color = when {
+                                            isRunning -> Amber
+                                            isFailed -> Red
+                                            else -> Green
+                                        },
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    )
+                                }
+
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = null,
+                                        tint = Amber,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                }
                             }
                         }
                     }
@@ -792,13 +869,14 @@ private fun RoundPickerSheet(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
+                            val rNum = if (record.plan.round > 0) record.plan.round else (records.size - index).coerceAtLeast(1)
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Surface(
                                     color = if (isSelected) Cyan.copy(alpha = 0.2f) else LineSoft,
                                     shape = RoundedCornerShape(6.dp),
                                 ) {
                                     Text(
-                                        text = "R${record.plan.round}",
+                                        text = "R$rNum",
                                         color = if (isSelected) Cyan else Text,
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
@@ -809,7 +887,7 @@ private fun RoundPickerSheet(
                                 Column {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
-                                            text = "第 ${record.plan.round} 轮",
+                                            text = "第 $rNum 轮",
                                             color = Text,
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.SemiBold,
