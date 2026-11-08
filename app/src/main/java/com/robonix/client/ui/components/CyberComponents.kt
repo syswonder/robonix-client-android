@@ -193,6 +193,17 @@ fun CodeBlockView(
     val context = LocalContext.current
     val scrollState = rememberScrollState()
 
+    // Safety guard: prevent Compose Constraints crash on massive payload strings (e.g. 1.2MB image/pointcloud)
+    val maxDisplayChars = 8000
+    val isTruncated = code.length > maxDisplayChars
+    val displayCode = remember(code) {
+        if (isTruncated) {
+            code.take(maxDisplayChars) + "\n\n/* ... [数据量过大 (${code.length / 1024} KB)，已安全截断显示。点击上方 Copy 可复制完整数据] ... */"
+        } else {
+            code
+        }
+    }
+
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = Panel,
@@ -252,7 +263,7 @@ fun CodeBlockView(
                     .padding(10.dp),
             ) {
                 Text(
-                    text = code,
+                    text = displayCode,
                     color = Text,
                     fontSize = 11.5.sp,
                     lineHeight = 16.sp,

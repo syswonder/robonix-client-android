@@ -271,7 +271,12 @@ fun RtdlNodeDetailSheet(
                 )
                 Spacer(Modifier.height(4.dp))
                 val argsJson = try {
-                    JSONObject(node.call.args).toString(2)
+                    val rawStr = node.call.args.toString()
+                    if (rawStr.length > 20000) {
+                        rawStr.take(8000) + "\n\n/* ... [超大参数已截断] ... */"
+                    } else {
+                        JSONObject(node.call.args).toString(2)
+                    }
                 } catch (_: Exception) {
                     node.call.args.toString()
                 }
@@ -292,9 +297,17 @@ fun RtdlNodeDetailSheet(
 
                 if (result.output.isNotBlank()) {
                     val formattedOutput = try {
-                        JSONObject(result.output).toString(2)
+                        if (result.output.length > 20000) {
+                            result.output.take(8000) + "\n\n/* ... [超大输出已截断显示，总计 ${result.output.length / 1024} KB] ... */"
+                        } else {
+                            JSONObject(result.output).toString(2)
+                        }
                     } catch (_: Exception) {
-                        result.output
+                        if (result.output.length > 20000) {
+                            result.output.take(8000) + "\n\n/* ... [超大输出已截断显示，总计 ${result.output.length / 1024} KB] ... */"
+                        } else {
+                            result.output
+                        }
                     }
                     CodeBlockView(code = formattedOutput, language = "OUTPUT")
                 }

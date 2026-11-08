@@ -2,15 +2,18 @@ package com.robonix.client.ui.chat
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
@@ -20,7 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -37,7 +40,6 @@ import com.robonix.client.ui.chat.rtdl.TreeLayoutEngine
 import com.robonix.client.ui.components.CyberCard
 import com.robonix.client.ui.components.PulsingStatusDot
 import com.robonix.client.ui.i18n.t
-import com.robonix.client.ui.i18n.tStatus
 import com.robonix.client.ui.navigation.SharedViewModel
 import com.robonix.client.ui.theme.*
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -53,6 +55,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import kotlin.math.max
 
 data class RtdlUiState(
     val planRecords: List<PlanRecord> = emptyList(),
@@ -148,6 +151,7 @@ class RtdlViewModel @Inject constructor(
 
     fun selectTask(taskId: String?) {
         rtdlState.selectTask(taskId)
+        _uiState.update { it.copy(selectedTaskId = taskId, selectedRecordIndex = 0) }
     }
 }
 
@@ -204,8 +208,14 @@ private fun BehaviorTreeSection(
     modifier: Modifier = Modifier,
 ) {
     var inspectedNodeIndex by remember { mutableStateOf<Int?>(null) }
+    var showTaskSheet by remember { mutableStateOf(false) }
+    var showRoundSheet by remember { mutableStateOf(false) }
 
-    val selectedRecord = filteredRecords.getOrNull(state.selectedRecordIndex)
+    val currentIndex = if (filteredRecords.isNotEmpty()) {
+        state.selectedRecordIndex.coerceIn(0, filteredRecords.size - 1)
+    } else 0
+
+    val selectedRecord = filteredRecords.getOrNull(currentIndex)
     val plan = selectedRecord?.plan ?: state.livePlan
     val nodeStates = selectedRecord?.nodeStates ?: state.liveNodeStates
 
@@ -222,108 +232,30 @@ private fun BehaviorTreeSection(
         TreeLayoutEngine.computeLayout(plan, nodeStates)
     }
 
+    val tasks = state.taskState?.tasks ?: emptyList()
+    val currentTask = tasks.find { it.taskId == state.selectedTaskId }
+        ?: tasks.lastOrNull()
+
     Column(modifier = modifier) {
-        // 1. Task Selector Chips (separated per task, shown when multiple tasks exist)
-        val tasks = state.taskState?.tasks ?: emptyList()
-        if (tasks.size > 1) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .selectableGroup()
-                    .padding(bottom = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                tasks.forEachIndexed { i, task ->
-                    val isSelected = when {
-                        state.selectedTaskId != null -> state.selectedTaskId == task.taskId
-                        else -> i == tasks.size - 1 // follow-latest: last task selected by default
-                    }
-                    val isRunning = task.status.lowercase() in listOf("running", "active", "executing")
-                    val isFailed = task.status.lowercase() in listOf("failed", "error")
-                    val borderColor = when {
-                        isSelected -> Amber
-                        isRunning -> Amber.copy(alpha = 0.6f)
-                        isFailed -> Red.copy(alpha = 0.6f)
-                        else -> LineSoft
-                    }
-                    Surface(
-                        color = if (isSelected) Amber.copy(alpha = 0.18f) else Panel2,
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, borderColor),
-                        modifier = Modifier.selectable(
-                            selected = isSelected,
-                            role = Role.RadioButton,
-                            onClick = { onSelectTask(if (i == tasks.size - 1) null else task.taskId) },
-                        ),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            if (isRunning) {
-                                PulsingStatusDot(color = Amber, size = 5.dp)
-                                Spacer(Modifier.width(4.dp))
-                            }
-                            Text(
-                                text = task.goal.take(16).ifBlank { "任务 #${i + 1}" },
-                                color = if (isSelected) Amber else Text,
-                                fontSize = 11.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // 2. Round Selector Chips (each task has multiple rounds)
-        if (filteredRecords.size > 1) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .selectableGroup()
-                    .padding(bottom = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                filteredRecords.forEachIndexed { i, record ->
-                    val isSelected = i == state.selectedRecordIndex
-                    Surface(
-                        color = if (isSelected) Cyan.copy(alpha = 0.2f) else Panel2,
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, if (isSelected) Cyan else LineSoft),
-                        modifier = Modifier.selectable(
-                            selected = isSelected,
-                            role = Role.RadioButton,
-                            onClick = { onSelectRecord(i) },
-                        ),
-                    ) {
-                        Text(
-                            text = t("rtdl.record", record.plan.round, record.plan.nodes.size),
-                            color = if (isSelected) Cyan else Text,
-                            fontSize = 11.sp,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        )
-                    }
-                }
-            }
-        }
-
-        // 3. Compact Cyber Summary Card with Refresh button
-        BehaviorTreeSummaryCard(
+        // Plan A: Unified Control Header (Task Dropdown + Round Stepper + Metrics)
+        RtdlControlHeader(
+            tasks = tasks,
+            currentTask = currentTask,
+            overallGoal = state.taskState?.goal,
+            filteredRecords = filteredRecords,
+            selectedRecordIndex = currentIndex,
+            isRefreshing = isRefreshing,
             plan = plan,
             nodeStates = nodeStates,
-            isRefreshing = isRefreshing,
+            onOpenTaskSheet = { showTaskSheet = true },
+            onOpenRoundSheet = { showRoundSheet = true },
+            onSelectRecord = onSelectRecord,
             onRefresh = onRefresh,
         )
 
         Spacer(Modifier.height(8.dp))
 
-        // 4. Dynamic Interactive Canvas (Edge-to-edge, status-colored branches & capsules)
+        // Dynamic Interactive Canvas (Edge-to-edge, serial status-colored pipeline)
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -340,6 +272,26 @@ private fun BehaviorTreeSection(
         }
     }
 
+    // Modal Task Picker Sheet
+    if (showTaskSheet && tasks.isNotEmpty()) {
+        TaskPickerSheet(
+            tasks = tasks,
+            selectedTaskId = state.selectedTaskId ?: tasks.lastOrNull()?.taskId,
+            onSelectTask = onSelectTask,
+            onDismiss = { showTaskSheet = false },
+        )
+    }
+
+    // Modal Round Picker Sheet
+    if (showRoundSheet && filteredRecords.isNotEmpty()) {
+        RoundPickerSheet(
+            records = filteredRecords,
+            selectedRecordIndex = currentIndex,
+            onSelectRecord = onSelectRecord,
+            onDismiss = { showRoundSheet = false },
+        )
+    }
+
     // Modal Bottom Sheet Detail Inspector
     if (inspectedNodeIndex != null) {
         val selectedLayoutNode = layoutResult.nodes.find { it.node.index == inspectedNodeIndex }
@@ -353,13 +305,31 @@ private fun BehaviorTreeSection(
     }
 }
 
+/**
+ * Plan A: Unified Cockpit Control Header
+ * Line 1: Task Dropdown Pill + Node Progress + Refresh
+ * Line 2: Playback Stepper (Prev < | Round ▾ | Next >) + Live/Latest Tag
+ * Bottom: Hairline Progress Line
+ */
 @Composable
-private fun BehaviorTreeSummaryCard(
+private fun RtdlControlHeader(
+    tasks: List<TaskSummary>,
+    currentTask: TaskSummary?,
+    overallGoal: String? = null,
+    filteredRecords: List<PlanRecord>,
+    selectedRecordIndex: Int,
+    isRefreshing: Boolean,
     plan: RtdlPlan,
     nodeStates: Map<Int, RtdlNodeState>,
-    isRefreshing: Boolean,
+    onOpenTaskSheet: () -> Unit,
+    onOpenRoundSheet: () -> Unit,
+    onSelectRecord: (Int) -> Unit,
     onRefresh: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
+    val isTaskRunning = currentTask?.status?.lowercase() in listOf("running", "active", "executing")
+    val isTaskFailed = currentTask?.status?.lowercase() in listOf("failed", "error")
+
     val aggregated = remember(plan, nodeStates) { TreeLayoutEngine.aggregateNodeStatuses(plan, nodeStates) }
     fun statusOf(index: Int) = nodeStates[index]?.state ?: aggregated[index]
     val total = plan.nodes.size
@@ -368,48 +338,98 @@ private fun BehaviorTreeSummaryCard(
     val failed = plan.nodes.count { statusOf(it.index) in listOf("FAILED", "ERROR") }
 
     CyberCard(
-        modifier = Modifier.fillMaxWidth(),
-        borderColor = LineSoft,
+        modifier = modifier.fillMaxWidth(),
+        borderColor = if (isTaskRunning) Amber.copy(alpha = 0.45f) else LineSoft,
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
+            // Line 1: Task Selector Pill (Left) + Stats & Refresh (Right)
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Row(
-                    modifier = Modifier.weight(1f, fill = false),
-                    verticalAlignment = Alignment.CenterVertically,
+                // Task Dropdown Pill
+                Surface(
+                    color = if (isTaskRunning) Amber.copy(alpha = 0.14f) else Panel2,
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (isTaskRunning) Amber.copy(alpha = 0.5f) else LineSoft,
+                    ),
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(enabled = tasks.size > 1) { onOpenTaskSheet() },
                 ) {
-                    Icon(Icons.Default.AccountTree, null, tint = Cyan, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = t("rtdl.plan.id", plan.planId.take(16)),
-                        color = Text,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        PulsingStatusDot(
+                            color = if (isTaskRunning) Amber else if (isTaskFailed) Red else Green,
+                            size = 6.dp,
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        val taskTitle = currentTask?.goal?.take(22)?.ifBlank { null }
+                            ?: overallGoal?.take(22)?.ifBlank { null }
+                            ?: if (tasks.isNotEmpty()) "任务 #${tasks.indexOf(currentTask) + 1}" else "当前任务"
+                        Text(
+                            text = taskTitle,
+                            color = Text,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (tasks.size > 1) {
+                            Spacer(Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Default.ArrowDropDown,
+                                contentDescription = "Select Task",
+                                tint = Cyan,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
                 }
 
+                Spacer(Modifier.width(8.dp))
+
+                // Stats & Refresh
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    // Round Pill
+                    // Mini node progress tag
                     Surface(
-                        color = Cyan.copy(alpha = 0.12f),
-                        shape = RoundedCornerShape(10.dp),
-                        border = BorderStroke(0.8.dp, Cyan.copy(alpha = 0.4f)),
+                        color = Panel2,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(0.6.dp, LineSoft),
                     ) {
-                        Text(
-                            text = t("rtdl.round", plan.round),
-                            color = Cyan,
-                            fontSize = 10.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                        )
+                        Row(
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            val dotColor = when {
+                                failed > 0 -> Red
+                                running > 0 -> Amber
+                                else -> Green
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(5.dp)
+                                    .clip(CircleShape)
+                                    .background(dotColor),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "$succeeded/$total",
+                                color = Text,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
                     }
 
                     // Refresh Button
@@ -430,40 +450,132 @@ private fun BehaviorTreeSummaryCard(
 
             Spacer(Modifier.height(8.dp))
 
-            // Progress Metrics Bar
+            // Line 2: Playback Stepper (Prev < | Round ▾ | Next >) + Live Button
+            val totalRounds = filteredRecords.size.coerceAtLeast(1)
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text(
-                    text = t("rtdl.nodes.completed", succeeded, total),
-                    color = Muted,
-                    fontSize = 11.sp,
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (running > 0) MetricTag(count = running, label = tStatus("RUNNING"), color = Amber)
-                    if (succeeded > 0) MetricTag(count = succeeded, label = tStatus("SUCCEEDED"), color = Green)
-                    if (failed > 0) MetricTag(count = failed, label = tStatus("FAILED"), color = Red)
+                // Stepper Group
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    val canGoPrev = selectedRecordIndex < filteredRecords.size - 1
+                    IconButton(
+                        onClick = { if (canGoPrev) onSelectRecord(selectedRecordIndex + 1) },
+                        enabled = canGoPrev,
+                        modifier = Modifier.size(28.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                            contentDescription = "Previous Round",
+                            tint = if (canGoPrev) Cyan else Dim.copy(alpha = 0.35f),
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+
+                    // Round Dropdown Pill
+                    Surface(
+                        color = Panel2,
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(0.8.dp, Cyan.copy(alpha = 0.4f)),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable(enabled = filteredRecords.size > 1) { onOpenRoundSheet() },
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "第 ${plan.round} 轮 / 共 $totalRounds 轮",
+                                color = Cyan,
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            if (filteredRecords.size > 1) {
+                                Spacer(Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = Icons.Default.ArrowDropDown,
+                                    contentDescription = "Pick Round",
+                                    tint = Cyan,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                            }
+                        }
+                    }
+
+                    val canGoNext = selectedRecordIndex > 0
+                    IconButton(
+                        onClick = { if (canGoNext) onSelectRecord(selectedRecordIndex - 1) },
+                        enabled = canGoNext,
+                        modifier = Modifier.size(28.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = "Next Round",
+                            tint = if (canGoNext) Cyan else Dim.copy(alpha = 0.35f),
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+
+                // Live / Return to Latest Pill
+                val isLatest = selectedRecordIndex == 0
+                Surface(
+                    color = if (isLatest) Cyan.copy(alpha = 0.16f) else Panel2,
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(
+                        width = 1.dp,
+                        color = if (isLatest) Cyan.copy(alpha = 0.5f) else LineSoft,
+                    ),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { if (!isLatest) onSelectRecord(0) },
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (isLatest) {
+                            PulsingStatusDot(color = Cyan, size = 5.dp)
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "实时",
+                                color = Cyan,
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        } else {
+                            Text(
+                                text = "回到最新",
+                                color = Amber,
+                                fontSize = 10.5.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
                 }
             }
 
             Spacer(Modifier.height(6.dp))
 
-            // Custom Linear Progress Bar (No BOM crash)
+            // Hairline Progress Line
             val progress = if (total > 0) succeeded.toFloat() / total.toFloat() else 0f
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(4.dp)
-                    .clip(RoundedCornerShape(2.dp))
+                    .height(2.5.dp)
+                    .clip(RoundedCornerShape(1.dp))
                     .background(Panel2),
             ) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth(fraction = progress.coerceIn(0f, 1f))
                         .fillMaxHeight()
-                        .clip(RoundedCornerShape(2.dp))
+                        .clip(RoundedCornerShape(1.dp))
                         .background(if (failed > 0) Red else if (running > 0) Amber else Cyan),
                 )
             }
@@ -471,22 +583,314 @@ private fun BehaviorTreeSummaryCard(
     }
 }
 
+/**
+ * Task Selection Bottom Sheet
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MetricTag(count: Int, label: String, color: Color) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
+private fun TaskPickerSheet(
+    tasks: List<TaskSummary>,
+    selectedTaskId: String?,
+    onSelectTask: (String?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = Panel,
+        scrimColor = Color.Black.copy(alpha = 0.6f),
+        dragHandle = {
+            Box(
+                modifier = Modifier
+                    .padding(vertical = 10.dp)
+                    .width(36.dp)
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Line),
+            )
+        },
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+    ) {
+        Column(
             modifier = Modifier
-                .size(6.dp)
-                .clip(CircleShape)
-                .background(color),
-        )
-        Spacer(Modifier.width(3.dp))
-        Text(
-            text = "$count $label",
-            color = color,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
-        )
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp)
+                .padding(bottom = 32.dp),
+        ) {
+            Text(
+                text = "选择执行任务",
+                color = Text,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(vertical = 4.dp),
+            )
+            Text(
+                text = "切换不同任务以查看对应的闭环决策与时序行为树",
+                color = Dim,
+                fontSize = 11.5.sp,
+                modifier = Modifier.padding(bottom = 12.dp),
+            )
+
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
+                tasks.forEachIndexed { i, task ->
+                    val isSelected = when {
+                        selectedTaskId != null -> selectedTaskId == task.taskId
+                        else -> i == tasks.size - 1
+                    }
+                    val isRunning = task.status.lowercase() in listOf("running", "active", "executing")
+                    val isFailed = task.status.lowercase() in listOf("failed", "error")
+
+                    Surface(
+                        color = if (isSelected) Amber.copy(alpha = 0.12f) else Panel2,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(
+                            width = if (isSelected) 1.5.dp else 0.8.dp,
+                            color = if (isSelected) Amber else LineSoft,
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onSelectTask(if (i == tasks.size - 1) null else task.taskId)
+                                onDismiss()
+                            },
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    PulsingStatusDot(
+                                        color = if (isRunning) Amber else if (isFailed) Red else Green,
+                                        size = 6.dp,
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        text = "任务 #${i + 1}",
+                                        color = if (isSelected) Amber else Cyan,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        text = "共 ${task.planIds.size} 轮计划",
+                                        color = Dim,
+                                        fontSize = 11.sp,
+                                    )
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = task.goal.ifBlank { "未命名目标" },
+                                    color = Text,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+
+                            if (isSelected) {
+                                Spacer(Modifier.width(8.dp))
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = null,
+                                    tint = Amber,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Round Selection Bottom Sheet
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RoundPickerSheet(
+    records: List<PlanRecord>,
+    selectedRecordIndex: Int,
+    onSelectRecord: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = Panel,
+        scrimColor = Color.Black.copy(alpha = 0.6f),
+        dragHandle = {
+            Box(
+                modifier = Modifier
+                    .padding(vertical = 10.dp)
+                    .width(36.dp)
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Line),
+            )
+        },
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp)
+                .padding(bottom = 32.dp),
+        ) {
+            Text(
+                text = "轮次快速跳转",
+                color = Text,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(vertical = 4.dp),
+            )
+            Text(
+                text = "按时序回溯该任务下的每一轮 RTDL 执行结果",
+                color = Dim,
+                fontSize = 11.5.sp,
+                modifier = Modifier.padding(bottom = 12.dp),
+            )
+
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
+                records.forEachIndexed { index, record ->
+                    val isSelected = index == selectedRecordIndex
+                    val isLatest = index == 0
+                    val total = record.plan.nodes.size
+                    val nodeStatuses = record.nodeStates.values.map { it.state.uppercase() }
+                    val hasFailed = nodeStatuses.any { it in listOf("FAILED", "ERROR") }
+                    val hasRunning = nodeStatuses.any { it in listOf("RUNNING", "ACTIVE") }
+                    val allSucceeded = nodeStatuses.isNotEmpty() && nodeStatuses.all { it in listOf("SUCCEEDED", "SUCCESS") }
+
+                    Surface(
+                        color = if (isSelected) Cyan.copy(alpha = 0.14f) else Panel2,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(
+                            width = if (isSelected) 1.5.dp else 0.8.dp,
+                            color = if (isSelected) Cyan else LineSoft,
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onSelectRecord(index)
+                                onDismiss()
+                            },
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    color = if (isSelected) Cyan.copy(alpha = 0.2f) else LineSoft,
+                                    shape = RoundedCornerShape(6.dp),
+                                ) {
+                                    Text(
+                                        text = "R${record.plan.round}",
+                                        color = if (isSelected) Cyan else Text,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                                    )
+                                }
+                                Spacer(Modifier.width(10.dp))
+                                Column {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = "第 ${record.plan.round} 轮",
+                                            color = Text,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                        )
+                                        if (isLatest) {
+                                            Spacer(Modifier.width(6.dp))
+                                            Surface(
+                                                color = Cyan.copy(alpha = 0.16f),
+                                                shape = RoundedCornerShape(4.dp),
+                                            ) {
+                                                Text(
+                                                    text = "最新",
+                                                    color = Cyan,
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                                )
+                                            }
+                                        }
+                                    }
+                                    Text(
+                                        text = "计划 ID: ${record.plan.planId.take(12)} · $total 个节点",
+                                        color = Dim,
+                                        fontSize = 10.5.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                    )
+                                }
+                            }
+
+                            // Status Tag
+                            Surface(
+                                color = when {
+                                    hasFailed -> Red.copy(alpha = 0.14f)
+                                    hasRunning -> Amber.copy(alpha = 0.14f)
+                                    allSucceeded -> Green.copy(alpha = 0.14f)
+                                    else -> LineSoft.copy(alpha = 0.4f)
+                                },
+                                shape = RoundedCornerShape(6.dp),
+                            ) {
+                                Text(
+                                    text = when {
+                                        hasFailed -> "失败"
+                                        hasRunning -> "运行中"
+                                        allSucceeded -> "成功"
+                                        else -> "完成"
+                                    },
+                                    color = when {
+                                        hasFailed -> Red
+                                        hasRunning -> Amber
+                                        allSucceeded -> Green
+                                        else -> Dim
+                                    },
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RtdlErrorBanner(error: String) {
+    Surface(
+        color = Red.copy(alpha = 0.12f),
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(0.8.dp, Red.copy(alpha = 0.4f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Default.ErrorOutline, null, tint = Red, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(text = error, color = Red, fontSize = 11.5.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 
@@ -496,65 +900,27 @@ private fun RtdlEmptyState(
     subtitle: String,
     icon: ImageVector,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 64.dp, start = 24.dp, end = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
     ) {
-        Surface(
-            color = Panel2,
-            shape = CircleShape,
-            border = BorderStroke(1.dp, LineSoft),
-            modifier = Modifier.size(56.dp),
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(32.dp),
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = Dim,
-                    modifier = Modifier.size(26.dp),
-                )
+            Surface(
+                color = Panel2,
+                shape = CircleShape,
+                modifier = Modifier.size(64.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(icon, null, tint = Dim, modifier = Modifier.size(32.dp))
+                }
             }
-        }
-        Spacer(Modifier.height(14.dp))
-        Text(
-            text = title,
-            color = Text,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = subtitle,
-            color = Dim,
-            fontSize = 11.5.sp,
-            modifier = Modifier.padding(horizontal = 16.dp),
-        )
-    }
-}
-
-@Composable
-private fun RtdlErrorBanner(error: String) {
-    Surface(
-        color = Red.copy(alpha = 0.12f),
-        shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(1.dp, Red.copy(alpha = 0.3f)),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Default.ErrorOutline, null, tint = Red, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = error,
-                color = Red,
-                fontSize = 11.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Spacer(Modifier.height(16.dp))
+            Text(text = title, color = Text, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Text(text = subtitle, color = Dim, fontSize = 12.sp, maxLines = 3)
         }
     }
 }
