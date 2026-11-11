@@ -39,10 +39,10 @@ class SettingsStore @Inject constructor(
 
     val settings: Flow<Map<String, Any>> = context.dataStore.data.map { prefs ->
         mapOf(
-            "robotHost" to (prefs[KEY_ROBOT_HOST] ?: "100.87.172.93"),
+            "robotHost" to (prefs[KEY_ROBOT_HOST] ?: ""),
             "atlasPort" to (prefs[KEY_ATLAS_PORT] ?: 50051),
             "liaisonEndpoint" to (prefs[KEY_LIAISON_ENDPOINT] ?: ""),
-            "userId" to (prefs[KEY_USER_ID] ?: "voice:wheatfox"),
+            "userId" to (prefs[KEY_USER_ID] ?: ""),
             "sessionId" to (prefs[KEY_SESSION_ID] ?: ""),
             "recordSeconds" to (prefs[KEY_RECORD_SECONDS] ?: 30),
             "language" to (prefs[KEY_LANGUAGE] ?: "system"),

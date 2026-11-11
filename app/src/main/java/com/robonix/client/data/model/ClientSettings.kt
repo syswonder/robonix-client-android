@@ -1,10 +1,10 @@
 package com.robonix.client.data.model
 
 data class ClientSettings(
-    val robotHost: String = "100.87.172.93",
+    val robotHost: String = "",
     val atlasPort: Int = 50051,
     val liaisonEndpoint: String = "",
-    val userId: String = "voice:wheatfox",
+    val userId: String = "",
     val sessionId: String = "",
     val recordSeconds: Int = 30,
     val language: String = "system",
