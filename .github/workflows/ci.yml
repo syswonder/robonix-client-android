@@ -25,6 +25,14 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # gradle.properties pins a Windows-ROOT trust store for local Windows
+      # builds, which leaves the JVM with no TLS on Linux. The home properties
+      # file wins over the project one, so override the JVM args here.
+      - name: Override the Windows trust store for this runner
+        run: |
+          echo 'org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8' \
+            >> "$GRADLE_USER_HOME/gradle.properties"
+
       - name: Unit tests
         run: ./gradlew testDebugUnitTest
 
