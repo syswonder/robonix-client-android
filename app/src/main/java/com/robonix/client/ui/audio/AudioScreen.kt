@@ -151,8 +151,9 @@ class AudioViewModel @Inject constructor(
         _uiState.update { it.copy(devicesBusy = true) }
         try {
             val list = audioRepository.listAudioDevices(target, providerId)
-            val inputs = list.devices.filter { d -> d.kind.equals("input", ignoreCase = true) }
-            val preferred = preferredDeviceId.takeIf { p -> inputs.any { it.id == p } } ?: ""
+            val inputs = list.devices.filter { d -> d.kind.equals("input", ignoreCase = true) || d.kind.equals("duplex", ignoreCase = true) }
+            val preferred = listOf(preferredDeviceId, list.currentInputId)
+                .firstOrNull { p -> p.isNotBlank() && inputs.any { it.id == p } } ?: ""
             _uiState.update {
                 it.copy(
                     micDevices = inputs,
@@ -171,8 +172,9 @@ class AudioViewModel @Inject constructor(
         _uiState.update { it.copy(devicesBusy = true) }
         try {
             val list = audioRepository.listAudioDevices(target, providerId)
-            val outputs = list.devices.filter { d -> d.kind.equals("output", ignoreCase = true) }
-            val preferred = preferredDeviceId.takeIf { p -> outputs.any { it.id == p } } ?: ""
+            val outputs = list.devices.filter { d -> d.kind.equals("output", ignoreCase = true) || d.kind.equals("duplex", ignoreCase = true) }
+            val preferred = listOf(preferredDeviceId, list.currentOutputId)
+                .firstOrNull { p -> p.isNotBlank() && outputs.any { it.id == p } } ?: ""
             _uiState.update {
                 it.copy(
                     speakerDevices = outputs,
