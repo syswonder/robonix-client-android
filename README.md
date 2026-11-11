@@ -54,22 +54,31 @@ Robonix 的 Android 手机客户端：和机器人对话、下发任务，查看
 
 ### Release 签名
 
+至今发布的 APK 都用 Android debug 密钥签名，证书为 `CN=Android Debug`，SHA-256 为
+`0b1526ce8624baaef38db8459ddb7cf6a5378d103e68037e65f8ea89b0650c50`。换成其它密钥会让已安装的手机拒绝覆盖升级，
+因此发布流程固定校验这个指纹。debug 密钥的密码是公开的 `android`，所以这不是防篡改的签名，Google Play 也不接受；
+将来换正式密钥需要单独规划一个版本，并提示用户卸载重装。
+
 签名配置放在 `keystore/release.properties`，这个文件不进仓库：
 
 ```properties
 storeFile=keystore/release.jks
-storePassword=...
-keyAlias=...
-keyPassword=...
+storePassword=android
+keyAlias=androiddebugkey
+keyPassword=android
 ```
 
-没有这个文件时，`assembleRelease` 会改用 debug 签名。这样打出来的包和 Release 页面上的签名不同，已安装正式版的手机不能覆盖安装。
+`keystore/release.jks` 就是 `~/.android/debug.keystore` 的副本。没有这两个文件时，`assembleRelease` 会回落到
+Gradle 自己的 debug 签名配置，本机验证够用，但不要拿这种包发布。
 
 ### 发布新版本
 
 1. 修改 `app/build.gradle.kts` 中的 `versionCode`（加 1）和 `versionName`。
-2. 用正式签名运行 `./gradlew assembleRelease`，把 APK 重命名为 `robonix-client-android-v<版本>.apk`。
-3. 在 GitHub 创建 tag 为 `v<版本>` 的 Release，并上传 APK。
+2. 提交并推送到 `main`，等 CI 通过。
+3. 打 tag `v<版本>` 并推送。Release workflow 会构建 APK、校验证书指纹、创建 Release 并上传。
+
+workflow 需要仓库 secret `DEBUG_KEYSTORE_BASE64`，值为 `base64 -w0 ~/.android/debug.keystore` 的输出。
+Release 正文由 `--generate-notes` 自动生成，发布后可以手工补充中文变更说明。
 
 ## 项目结构
 
