@@ -35,6 +35,8 @@ internal object PlanHistoryCodec {
         "rootIndex" to p.rootIndex, "nodes" to array(p.nodes.map { n -> obj(
             "index" to n.index, "kindId" to n.kindId, "kind" to n.kind,
             "children" to array(n.children), "opId" to n.opId, "description" to n.description,
+            "conditionJson" to n.conditionJson, "bind" to n.bind,
+            "repeatCount" to n.repeatCount, "maxIterations" to n.maxIterations,
             "call" to n.call?.let { c -> obj("callId" to c.callId, "providerId" to c.providerId,
                 "contractId" to c.contractId, "name" to c.name, "args" to jsonValue(c.args)) },
         ) }),
@@ -45,17 +47,28 @@ internal object PlanHistoryCodec {
             (0 until nodes.length()).map { i ->
                 val n = nodes.getJSONObject(i)
                 val children = n.optJSONArray("children") ?: JSONArray()
-                RtdlNode(n.getInt("index"), n.optInt("kindId"), n.optString("kind"),
-                    (0 until children.length()).map { children.getInt(it) }, n.optString("opId"), n.optString("description"),
-                    n.optJSONObject("call")?.let { c ->
+                RtdlNode(
+                    index = n.getInt("index"),
+                    kindId = n.optInt("kindId"),
+                    kind = n.optString("kind"),
+                    children = (0 until children.length()).map { children.getInt(it) },
+                    opId = n.optString("opId"),
+                    description = n.optString("description"),
+                    call = n.optJSONObject("call")?.let { c ->
                         val args = c.optJSONObject("args") ?: JSONObject()
                         CapabilityCall(c.optString("callId"), c.optString("providerId"), c.optString("contractId"),
                             c.optString("name"), args.keys().asSequence().associateWith { value(args.get(it)) })
-                    })
+                    },
+                    conditionJson = n.optString("conditionJson", ""),
+                    bind = n.optString("bind", ""),
+                    repeatCount = n.optInt("repeatCount", 0),
+                    maxIterations = n.optInt("maxIterations", 0),
+                )
             })
     }
     private fun stateObject(s: RtdlNodeState) = obj("nodeIndex" to s.nodeIndex, "state" to s.state,
         "planId" to s.planId, "opId" to s.opId, "description" to s.description,
+        "operatorDetail" to s.operatorDetail, "nodeKind" to s.nodeKind,
         "leafResult" to s.leafResult?.let { r -> obj("callId" to r.callId, "providerId" to r.providerId,
             "contractId" to r.contractId, "name" to r.name, "success" to r.success,
             "output" to r.output, "error" to r.error) })
@@ -63,7 +76,8 @@ internal object PlanHistoryCodec {
         s.optJSONObject("leafResult")?.let { r -> CapabilityCallResult(r.optString("callId"),
             r.optString("providerId"), r.optString("contractId"), r.optString("name"),
             r.optBoolean("success"), r.optString("output"), r.optString("error")) },
-        s.optString("planId"), s.optString("opId"), s.optString("description"))
+        s.optString("planId"), s.optString("opId"), s.optString("description"),
+        s.optString("operatorDetail"), s.optInt("nodeKind"))
     fun encodeStates(states: Map<Int, RtdlNodeState>): String = JSONObject().apply {
         states.forEach { (key, s) -> put(key.toString(), stateObject(s)) }
     }.toString()

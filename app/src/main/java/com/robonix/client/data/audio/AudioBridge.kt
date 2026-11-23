@@ -7,10 +7,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -71,17 +78,25 @@ class AudioBridge @Inject constructor(
     private val _events = MutableSharedFlow<AudioBridgeEvent>(extraBufferCapacity = 64)
     val events: SharedFlow<AudioBridgeEvent> = _events.asSharedFlow()
 
+    private val _status = MutableStateFlow(AudioBridgeStatus())
+
+    /** Whether this client holds the robot's reverse-audio slot, or lost it to another client. */
+    val status: StateFlow<AudioBridgeStatus> = _status.asStateFlow()
+
     @Volatile
     private var socket: WebSocket? = null
 
     @Volatile
-    private var connected = false
-
-    @Volatile
     private var active = false
 
-    private var endpoint: String = ""
     private var connectJob: Job? = null
+
+    /** A pending lookup or callback can act only on the generation it started with. */
+    @Volatile
+    private var generation = 0L
+    private var openedGeneration = -1L
+
+    fun connectionGeneration(): Long = generation
 
     private var micJob: Job? = null
 
@@ -91,123 +106,181 @@ class AudioBridge @Inject constructor(
 
         @Volatile
         var interrupted = false
+
+        /** AudioTrack would not start: drop this utterance's frames until speaker_end. */
+        @Volatile
+        var dropped = false
     }
 
     private var speakerSession: SpeakerSession? = null
 
-    /**
-     * Dial the robot and keep the socket open (reconnecting on drops) until
-     * [disconnect]. Re-calling with the same endpoint while active is a no-op.
-     */
-    fun connect(newEndpoint: String) {
-        if (newEndpoint.isBlank()) return
-        synchronized(this) {
-            if (active && endpoint == newEndpoint) return
-            endpoint = newEndpoint
-            active = true
-        }
-        connectJob?.cancel()
-        connectJob = scope.launch { connectionLoop(newEndpoint) }
-        AppLog.write(TAG, "AudioBridge connect requested: $newEndpoint")
+    @Synchronized
+    fun connect(
+        route: AudioBridgeRoute,
+        url: String,
+        expectedGeneration: Long,
+        takeOver: Boolean,
+        occupied: suspend () -> Boolean?,
+    ): Long? {
+        if (generation != expectedGeneration) return null
+        if (active && _status.value.route == route && _status.value.url == url &&
+            (_status.value.connected || (!takeOver && _status.value.phase == AudioBridgePhase.Connecting))
+        ) return generation
+
+        val request = Request.Builder().url(url).build()
+        stopConnection()
+        val attempt = ++generation
+        active = true
+        _status.value = AudioBridgeStatus(AudioBridgePhase.Connecting, route, url, attempt)
+        connectJob = scope.launch { connectionLoop(request, attempt, occupied) }
+        AppLog.write(TAG, "AudioBridge connect requested: $url")
+        return attempt
     }
 
-    /** True once the WebSocket handshake completed and stays true until it drops. */
-    fun isConnected(): Boolean = connected
-
-    /** Suspend until the socket is open (or [timeoutMs] elapses). */
-    suspend fun awaitConnected(timeoutMs: Long = 3000): Boolean {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            if (connected) return true
-            delay(50)
-        }
-        return connected
+    @Synchronized
+    fun reportAvailability(route: AudioBridgeRoute, expectedGeneration: Long, phase: AudioBridgePhase) {
+        val current = _status.value
+        if (generation != expectedGeneration || current.connected || current.takenOver) return
+        if (active && current.route != route) return
+        _status.value = current.copy(phase = phase, route = route, generation = generation)
     }
 
-    fun disconnect() {
-        val job: Job?
-        synchronized(this) {
-            active = false
-            job = connectJob
-            connectJob = null
-        }
-        job?.cancel()
-        stopMic()
-        stopSpeaker()
-        socket?.cancel()
-        socket = null
-        connected = false
+    suspend fun awaitConnected(attempt: Long, timeoutMs: Long = 3000): Boolean =
+        withTimeoutOrNull(timeoutMs) {
+            status.first {
+                it.generation != attempt || it.connected || it.takenOver
+            }.let { it.generation == attempt && it.connected }
+        } ?: false
+
+    @Synchronized
+    fun abandonHandshake(attempt: Long) {
+        if (generation == attempt && openedGeneration != attempt && !_status.value.takenOver) disconnect()
+    }
+
+    @Synchronized
+    fun disconnect(route: AudioBridgeRoute? = null) {
+        if (route != null && _status.value.route != route) return
+        generation++
+        stopConnection()
+        _status.value = AudioBridgeStatus(generation = generation)
         AppLog.write(TAG, "AudioBridge disconnected")
     }
 
-    /** Connect, and on failure/close retry while still active. */
-    private suspend fun connectionLoop(target: String) {
-        var kicked = 0
-        while (active) {
-            val closed = Channel<Unit>(Channel.CONFLATED)
-            val listener = Listener(target, closed)
-            val ws = client.newWebSocket(Request.Builder().url(target).build(), listener)
-            socket = ws
-            try {
-                closed.receive()
-            } catch (_: CancellationException) {
-                // Cancelled by disconnect(): fall through to cleanup below.
-            } finally {
-                if (socket === ws) socket = null
-                connected = false
-                stopMic()
-                stopSpeaker()
-                ws.cancel()
-            }
-            if (!active) break
-            // Another client (e.g. a desktop robonix-client) owns the single
-            // reverse-audio slot and keeps kicking us out. Retrying every second
-            // would just ping-pong, so back off while that is the case.
-            val aliveMs = listener.openTimeMs.takeIf { it > 0 }?.let { System.currentTimeMillis() - it } ?: 0
-            kicked = if (aliveMs > SESSION_ALIVE_MS) 0 else kicked + 1
-            val backoff = minOf(
-                RECONNECT_DELAY_MS shl minOf(kicked, 4),
-                MAX_RECONNECT_DELAY_MS,
-            )
-            if (kicked > 0) AppLog.write(TAG, "AudioBridge retry in ${backoff}ms (kicked $kicked time(s))")
-            delay(backoff)
+    // All socket and audio teardown runs under the same lock as adoption of a new connection.
+    private fun stopConnection() {
+        active = false
+        connectJob?.cancel()
+        connectJob = null
+        if (socket != null) {
+            stopMic()
+            stopSpeaker()
+            socket?.cancel()
+            socket = null
         }
     }
+
+    private suspend fun connectionLoop(request: Request, attempt: Long, occupied: suspend () -> Boolean?) {
+        var kicked = 0
+        var first = true
+        while (true) {
+            if (!first) {
+                val phase = reconnectPhase(occupied())
+                synchronized(this) {
+                    if (!isCurrent(attempt)) return
+                    _status.value = _status.value.copy(phase = phase)
+                }
+                if (phase != AudioBridgePhase.Connecting) {
+                    delay(MAX_RECONNECT_DELAY_MS)
+                    continue
+                }
+            }
+            first = false
+            val closed = Channel<Unit>(Channel.CONFLATED)
+            val listener = Listener(request.url.toString(), closed, attempt)
+            val ws = synchronized(this) {
+                if (!isCurrent(attempt)) return
+                client.newWebSocket(request, listener).also { socket = it }
+            }
+            try {
+                closed.receive()
+            } finally {
+                synchronized(this) {
+                    if (isCurrent(attempt) && socket === ws) {
+                        socket = null
+                        stopMic()
+                        stopSpeaker()
+                        val phase = if (listener.replaced) AudioBridgePhase.TakenOver else AudioBridgePhase.Connecting
+                        _status.value = _status.value.copy(phase = phase)
+                        if (listener.replaced) {
+                            active = false
+                            connectJob = null
+                            AppLog.write(TAG, "AudioBridge replaced by another client")
+                        }
+                    }
+                }
+                ws.cancel()
+            }
+            currentCoroutineContext().ensureActive()
+            if (listener.replaced) return
+            val aliveMs = listener.openTimeMs.takeIf { it > 0 }?.let { System.currentTimeMillis() - it } ?: 0
+            kicked = if (aliveMs > SESSION_ALIVE_MS) 0 else kicked + 1
+            delay(minOf(RECONNECT_DELAY_MS shl minOf(kicked, 4), MAX_RECONNECT_DELAY_MS))
+        }
+    }
+
+    private fun isCurrent(attempt: Long): Boolean = active && attempt == generation
 
     private inner class Listener(
         private val target: String,
         private val closed: Channel<Unit>,
+        private val gen: Long,
     ) : WebSocketListener() {
         @Volatile
         var openTimeMs = 0L
 
+        @Volatile
+        var replaced = false
+
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            socket = webSocket
-            connected = true
-            openTimeMs = System.currentTimeMillis()
-            AppLog.write(TAG, "AudioBridge connected: $target")
-            _events.tryEmit(AudioBridgeEvent.Connected(target))
-            webSocket.send("""{"type":"hello","role":"robonix-client"}""")
+            synchronized(this@AudioBridge) {
+                if (!isCurrent(gen) || socket !== webSocket) {
+                    webSocket.cancel()
+                    return
+                }
+                openedGeneration = gen
+                openTimeMs = System.currentTimeMillis()
+                _status.value = _status.value.copy(phase = AudioBridgePhase.Connected)
+                AppLog.write(TAG, "AudioBridge connected: $target")
+                _events.tryEmit(AudioBridgeEvent.Connected(target))
+                webSocket.send("""{"type":"hello","role":"robonix-client"}""")
+            }
         }
 
-        override fun onMessage(webSocket: WebSocket, text: String) = handleText(text)
+        override fun onMessage(webSocket: WebSocket, text: String) {
+            synchronized(this@AudioBridge) {
+                if (isCurrent(gen) && socket === webSocket) handleText(text)
+            }
+        }
 
-        override fun onMessage(webSocket: WebSocket, bytes: ByteString) =
-            enqueueSpeaker(bytes.toByteArray())
+        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            synchronized(this@AudioBridge) {
+                if (isCurrent(gen) && socket === webSocket) enqueueSpeaker(bytes.toByteArray())
+            }
+        }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            if (isReplacedClose(code, reason)) replaced = true
             webSocket.close(1000, null)
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            connected = false
+            if (isReplacedClose(code, reason)) replaced = true
             AppLog.write(TAG, "AudioBridge closed: code=$code reason=$reason")
             _events.tryEmit(AudioBridgeEvent.Disconnected(reason))
             closed.trySend(Unit)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            connected = false
             AppLog.write(TAG, "AudioBridge failure: ${t.message}")
             _events.tryEmit(AudioBridgeEvent.Error(t.message ?: "bridge error"))
             closed.trySend(Unit)
@@ -313,11 +386,11 @@ class AudioBridge @Inject constructor(
     }
 
     private fun stopMic() {
-        val job = micJob
+        val job = micJob ?: return
         micJob = null
         // Release the AudioRecord first so the blocking read loop can exit.
         audioRecorder.stop()
-        job?.cancel()
+        job.cancel()
     }
 
     // ── speaker: robot TTS PCM → AudioTrack ────────────────────────────────
@@ -343,8 +416,14 @@ class AudioBridge @Inject constructor(
         try {
             for (pcm in session.channel) {
                 if (session.interrupted) break
+                // Keep consuming so later frames of this utterance do not start a new session.
+                if (session.dropped) continue
                 if (!started) {
-                    audioPlayer.beginStream()
+                    if (!audioPlayer.beginStream()) {
+                        session.dropped = true
+                        AppLog.write(TAG, "speaker stream: AudioTrack failed to initialise, robot audio dropped until speaker_end")
+                        continue
+                    }
                     started = true
                 }
                 audioPlayer.writeStream(pcm)
@@ -383,6 +462,34 @@ class AudioBridge @Inject constructor(
         audioPlayer.stopStream()
     }
 }
+
+data class AudioBridgeRoute(val atlasEndpoint: String, val providerId: String)
+
+enum class AudioBridgePhase { Disconnected, Connecting, Connected, Occupied, TakenOver, OccupancyUnknown }
+
+data class AudioBridgeStatus(
+    val phase: AudioBridgePhase = AudioBridgePhase.Disconnected,
+    val route: AudioBridgeRoute? = null,
+    val url: String? = null,
+    val generation: Long = 0,
+) {
+    val connected: Boolean get() = phase == AudioBridgePhase.Connected
+    val takenOver: Boolean get() = phase == AudioBridgePhase.TakenOver
+}
+
+internal fun reconnectPhase(occupied: Boolean?): AudioBridgePhase = when (occupied) {
+    false -> AudioBridgePhase.Connecting
+    true -> AudioBridgePhase.Occupied
+    null -> AudioBridgePhase.OccupancyUnknown
+}
+
+internal const val REPLACED_CLOSE_CODE = 1012
+internal const val REPLACED_CLOSE_REASON = "replaced by newer client"
+
+/** The bridge closes the old client with this code/reason when a new client connects. */
+internal fun isReplacedClose(code: Int, reason: String?): Boolean =
+    code == REPLACED_CLOSE_CODE &&
+        reason?.contains(REPLACED_CLOSE_REASON, ignoreCase = true) == true
 
 sealed class AudioBridgeEvent {
     data class Connected(val endpoint: String) : AudioBridgeEvent()

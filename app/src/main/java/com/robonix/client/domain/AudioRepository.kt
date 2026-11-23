@@ -2,11 +2,17 @@ package com.robonix.client.domain
 
 import com.robonix.client.AppLog
 import com.robonix.client.data.audio.AudioBridge
+import com.robonix.client.data.audio.AudioBridgePhase
+import com.robonix.client.data.audio.AudioBridgeRoute
+import com.robonix.client.data.audio.AudioBridgeStatus
 import com.robonix.client.data.audio.AudioPlayer
 import com.robonix.client.data.audio.AudioRecorder
 import com.robonix.client.data.grpc.AtlasClient
 import com.robonix.client.data.grpc.GrpcChannelProvider
 import com.robonix.client.data.model.AudioProvider
+import com.robonix.client.data.model.ClientSettings
+import com.robonix.client.data.model.HandsfreeStatus
+import com.robonix.proto.audio.AudioChunk
 import com.robonix.proto.audio.GetAudioBridgeInfo_Request
 import com.robonix.proto.audio.GetAudioBridgeInfo_Response
 import com.robonix.proto.audio.ListAudioDevices_Request
@@ -14,11 +20,24 @@ import com.robonix.proto.audio.ListAudioDevices_Response
 import com.robonix.proto.audio.SelectAudioDevice_Request
 import com.robonix.proto.audio.SelectAudioDevice_Response
 import io.grpc.MethodDescriptor
+import io.grpc.Status
+import io.grpc.StatusRuntimeException
 import io.grpc.protobuf.ProtoUtils
 import io.grpc.stub.ClientCalls
+import io.grpc.stub.StreamObserver
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -34,6 +53,9 @@ class AudioRepository @Inject constructor(
         const val CONTRACT_AUDIO_BRIDGE_INFO = "robonix/primitive/audio/bridge_info"
         const val CONTRACT_AUDIO_LIST_DEVICES = "robonix/primitive/audio/list_devices"
         const val CONTRACT_AUDIO_SELECT_DEVICE = "robonix/primitive/audio/select_device"
+        const val CONTRACT_MIC = "robonix/primitive/audio/mic"
+        const val CONTRACT_SPEAKER = "robonix/primitive/audio/speaker"
+        const val CONTRACT_TTS = "robonix/service/speech/tts"
         const val CONTRACT_VOICEPRINT_ENROLL = "robonix/service/voiceprint/enroll"
     }
 
@@ -70,6 +92,30 @@ class AudioRepository @Inject constructor(
             .setResponseMarshaller(ProtoUtils.marshaller(com.robonix.proto.voiceprint.Enroll_Response.getDefaultInstance()))
             .build()
 
+    private val MIC_METHOD: MethodDescriptor<com.google.protobuf.Empty, AudioChunk> =
+        MethodDescriptor.newBuilder<com.google.protobuf.Empty, AudioChunk>()
+            .setType(MethodDescriptor.MethodType.SERVER_STREAMING)
+            .setFullMethodName("robonix.contracts.RobonixPrimitiveAudioMic/Mic")
+            .setRequestMarshaller(ProtoUtils.marshaller(com.google.protobuf.Empty.getDefaultInstance()))
+            .setResponseMarshaller(ProtoUtils.marshaller(AudioChunk.getDefaultInstance()))
+            .build()
+
+    private val SPEAKER_METHOD: MethodDescriptor<AudioChunk, com.google.protobuf.Empty> =
+        MethodDescriptor.newBuilder<AudioChunk, com.google.protobuf.Empty>()
+            .setType(MethodDescriptor.MethodType.CLIENT_STREAMING)
+            .setFullMethodName("robonix.contracts.RobonixPrimitiveAudioSpeaker/Speaker")
+            .setRequestMarshaller(ProtoUtils.marshaller(AudioChunk.getDefaultInstance()))
+            .setResponseMarshaller(ProtoUtils.marshaller(com.google.protobuf.Empty.getDefaultInstance()))
+            .build()
+
+    private val TTS_SYNTHESIZE_METHOD: MethodDescriptor<com.robonix.proto.tts.Synthesize_Request, com.robonix.proto.tts.Synthesize_Response> =
+        MethodDescriptor.newBuilder<com.robonix.proto.tts.Synthesize_Request, com.robonix.proto.tts.Synthesize_Response>()
+            .setType(MethodDescriptor.MethodType.UNARY)
+            .setFullMethodName("robonix.contracts.RobonixServiceSpeechTts/Synthesize")
+            .setRequestMarshaller(ProtoUtils.marshaller(com.robonix.proto.tts.Synthesize_Request.getDefaultInstance()))
+            .setResponseMarshaller(ProtoUtils.marshaller(com.robonix.proto.tts.Synthesize_Response.getDefaultInstance()))
+            .build()
+
     suspend fun getAudioProviders(target: String): Triple<List<AudioProvider>, List<AudioProvider>, List<AudioProvider>> =
         atlasClient.listAudioProviders(target)
 
@@ -80,6 +126,9 @@ class AudioRepository @Inject constructor(
      */
     suspend fun listAudioDevices(atlasEndpoint: String, providerId: String): com.robonix.client.data.model.AudioDeviceList {
         if (providerId.isBlank()) return com.robonix.client.data.model.AudioDeviceList()
+        // Asking a bridge provider would list the devices of whichever client holds the
+        // slot (possibly the Web client's PC), and would fail when no client is connected.
+        if (providerId in bridgeProviderIds(atlasEndpoint)) return LOCAL_BRIDGE_DEVICES
         return withContext(Dispatchers.IO) {
             val endpoint = atlasClient.connectCapability(atlasEndpoint, providerId, CONTRACT_AUDIO_LIST_DEVICES)
             val channel = channelProvider.getChannel(endpoint)
@@ -115,20 +164,22 @@ class AudioRepository @Inject constructor(
 
     /**
      * Push the configured route to the robot (web client's /api/audio-route/apply):
-     * connect the reverse audio bridge, then select mic/speaker devices when
-     * both node id and device id are set. Returns how many devices were applied.
+     * select mic/speaker devices when both node id and device id are set. Does not
+     * touch the reverse audio bridge, so applying never takes it from another client.
+     * A bridge provider has only this phone's fixed devices and nothing to select
+     * on the robot side, so it is skipped. Returns how many devices were applied.
      */
     suspend fun applyAudioRoute(
         atlasEndpoint: String,
         micNodeId: String, micDeviceId: String,
         speakerNodeId: String, speakerDeviceId: String,
     ): Int {
-        autoConnectBridge(atlasEndpoint, micNodeId, speakerNodeId)
+        val bridgeIds = bridgeProviderIds(atlasEndpoint)
         var selected = 0
-        if (micNodeId.isNotBlank() && micDeviceId.isNotBlank()) {
+        if (micNodeId.isNotBlank() && micDeviceId.isNotBlank() && micNodeId !in bridgeIds) {
             selectAudioDevice(atlasEndpoint, micNodeId, "input", micDeviceId); selected++
         }
-        if (speakerNodeId.isNotBlank() && speakerDeviceId.isNotBlank()) {
+        if (speakerNodeId.isNotBlank() && speakerDeviceId.isNotBlank() && speakerNodeId !in bridgeIds) {
             selectAudioDevice(atlasEndpoint, speakerNodeId, "output", speakerDeviceId); selected++
         }
         return selected
@@ -191,90 +242,231 @@ class AudioRepository @Inject constructor(
     }
 
     /**
-     * Auto-detect and connect the audio bridge through Atlas, following the
-     * same flow as the web client's _connect_selected_reverse_audio:
-     * 1. List all audio providers from Atlas
-     * 2. Check if the configured mic/speaker is a bridge provider
-     * 3. Discover the bridge's WebSocket endpoint via GetAudioBridgeInfo
-     * 4. Connect AudioBridge WebSocket
-     *
-     * @return the bridge WebSocket URL if connected, or null if no bridge is needed
+     * The device a provider is using right now, or null when it cannot say: list_devices is an
+     * optional contract, so a provider without it must not fail the test built around it.
      */
-    suspend fun autoConnectBridge(atlasEndpoint: String, micNodeId: String, speakerNodeId: String): String? {
-        AppLog.write("AUDIO", "autoConnectBridge: atlas=$atlasEndpoint mic=$micNodeId spk=$speakerNodeId")
-
-        // 1. Discover bridge providers
-        val (_, _, bridges) = try {
-            atlasClient.listAudioProviders(atlasEndpoint)
+    suspend fun activeDevice(atlasEndpoint: String, providerId: String, kind: String): ActiveDevice? {
+        if (providerId.isBlank()) return null
+        return try {
+            activeDeviceFrom(listAudioDevices(atlasEndpoint, providerId), kind)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            AppLog.write("AUDIO", "Failed to list audio providers: ${e.message}", e)
-            return null
+            null
         }
-
-        if (bridges.isEmpty()) {
-            AppLog.write("AUDIO", "No bridge providers found in Atlas")
-            return null
-        }
-
-        val bridgeIds = bridges.map { it.id }.toSet()
-        AppLog.write("AUDIO", "Bridge providers: $bridgeIds, selected mic=$micNodeId spk=$speakerNodeId")
-
-        // 2. Find the bridge provider that matches the configured mic or speaker
-        val selectedBridgeId = listOf(micNodeId, speakerNodeId).firstOrNull { it in bridgeIds }
-            ?: bridges.firstOrNull()?.id  // fallback: use any bridge provider
-            ?: return null
-
-        AppLog.write("AUDIO", "Selected bridge provider: $selectedBridgeId")
-
-        // 3. Get the bridge_info gRPC endpoint via Atlas
-        val bridgeGrpcEndpoint = try {
-            atlasClient.connectCapability(atlasEndpoint, selectedBridgeId, CONTRACT_AUDIO_BRIDGE_INFO)
-        } catch (e: Exception) {
-            AppLog.write("AUDIO", "Failed to connect bridge_info capability: ${e.message}", e)
-            return null
-        }
-        AppLog.write("AUDIO", "Bridge gRPC endpoint: $bridgeGrpcEndpoint")
-
-        // 4. Call GetAudioBridgeInfo to get the WebSocket URL
-        val wsUrl = try {
-            withContext(Dispatchers.IO) {
-                val channel = channelProvider.getChannel(bridgeGrpcEndpoint)
-                val request = GetAudioBridgeInfo_Request.newBuilder().build()
-                val response = ClientCalls.blockingUnaryCall(
-                    channel.newCall(BRIDGE_INFO_METHOD, io.grpc.CallOptions.DEFAULT), request)
-                if (!response.reverse || response.endpoint.isNullOrBlank()) {
-                    AppLog.write("AUDIO", "Bridge is not reverse or has no endpoint: reverse=${response.reverse}")
-                    return@withContext null
-                }
-                // Rewrite loopback address to the actual robot host
-                val rawWs = response.endpoint
-                val rewritten = rewriteWsEndpoint(rawWs, atlasEndpoint)
-                AppLog.write("AUDIO", "Bridge WS raw=$rawWs rewritten=$rewritten")
-                rewritten
-            }
-        } catch (e: Exception) {
-            AppLog.write("AUDIO", "GetAudioBridgeInfo failed: ${e.message}", e)
-            return null
-        }
-
-        if (wsUrl == null) return null
-
-        // 5. Connect the WebSocket bridge and wait until the handshake is done,
-        //    so the robot's mic stream finds a client when it opens.
-        AppLog.write("AUDIO", "Connecting AudioBridge to $wsUrl")
-        audioBridge.connect(wsUrl)
-        val ready = audioBridge.awaitConnected(3000)
-        AppLog.write("AUDIO", if (ready) "AudioBridge connected: $wsUrl" else "AudioBridge not connected: $wsUrl")
-
-        return if (ready) wsUrl else null
     }
 
+    /**
+     * Capture ~[seconds] from the robot's mic primitive, the same path ASR and voiceprint use
+     * (web client's record_pcm). An empty or silent capture is returned, not thrown: judging it
+     * is [judgeCapture]'s job.
+     */
+    suspend fun testMicRoute(atlasEndpoint: String, micNodeId: String, seconds: Float = 1f): MicTestResult =
+        withContext(Dispatchers.IO) {
+            val endpoint = atlasClient.discoverEndpoint(atlasEndpoint, CONTRACT_MIC, micNodeId)
+            val channel = channelProvider.getChannel(endpoint)
+            val startedAt = System.nanoTime()
+            val deadline = startedAt + (seconds * 1e9).toLong()
+            val call = channel.newCall(
+                MIC_METHOD,
+                io.grpc.CallOptions.DEFAULT.withDeadlineAfter((seconds + 5).toLong(), TimeUnit.SECONDS),
+            )
+            val out = ByteArrayOutputStream()
+            try {
+                // Interruptible, so leaving the screen does not leave this thread blocked on the stream.
+                runInterruptible {
+                    val chunks = ClientCalls.blockingServerStreamingCall(call, com.google.protobuf.Empty.getDefaultInstance())
+                    while (chunks.hasNext()) {
+                        chunks.next().data.writeTo(out)
+                        if (System.nanoTime() >= deadline) break
+                    }
+                }
+            } catch (e: StatusRuntimeException) {
+                // No chunk arrived at all before the deadline: that is an empty capture, not a failure.
+                if (e.status.code != Status.Code.DEADLINE_EXCEEDED || out.size() > 0) throw e
+            } finally {
+                call.cancel("mic test finished", null)
+            }
+            val pcm = out.toByteArray()
+            MicTestResult(pcm.size, (System.nanoTime() - startedAt) / 1_000_000, pcm16Stats(pcm))
+        }
+
+    /**
+     * Synthesize [text] and play it through the robot's speaker primitive (web client's
+     * play_tts_test, unary TTS path). Success means the speaker accepted the stream; it cannot
+     * prove sound came out, because the robot-side driver does not report playback failures.
+     */
+    suspend fun testSpeakerRoute(
+        atlasEndpoint: String,
+        speakerNodeId: String,
+        ttsNodeId: String,
+        text: String,
+    ): SpeakerTestResult = withContext(Dispatchers.IO) {
+        val ttsEndpoint = atlasClient.discoverEndpoint(atlasEndpoint, CONTRACT_TTS, ttsNodeId)
+        val speakerEndpoint = atlasClient.discoverEndpoint(atlasEndpoint, CONTRACT_SPEAKER, speakerNodeId)
+        val synth = ClientCalls.blockingUnaryCall(
+            channelProvider.getChannel(ttsEndpoint).newCall(
+                TTS_SYNTHESIZE_METHOD,
+                io.grpc.CallOptions.DEFAULT.withDeadlineAfter(15, TimeUnit.SECONDS),
+            ),
+            com.robonix.proto.tts.Synthesize_Request.newBuilder()
+                // The app's language setting is "system"/"zh"/"en", not the BCP-47 tag this field takes.
+                .setText(text).setLanguage("").setVoice("").setSpeed(1.0f).build(),
+        )
+        if (synth.error.isNotBlank()) throw RuntimeException(synth.error)
+        val audio = synth.audioData.toByteArray()
+        if (audio.isEmpty()) throw RuntimeException("TTS returned no audio")
+        val rate = synth.sampleRateHz.takeIf { it > 0 } ?: 16000
+        sendToSpeaker(channelProvider.getChannel(speakerEndpoint), speakerChunks(audio, rate))
+        SpeakerTestResult(audio.size, rate)
+    }
+
+    private suspend fun sendToSpeaker(channel: io.grpc.Channel, chunks: List<AudioChunk>) {
+        val done = CompletableFuture<Unit>()
+        val call = channel.newCall(
+            SPEAKER_METHOD,
+            io.grpc.CallOptions.DEFAULT.withDeadlineAfter(30, TimeUnit.SECONDS),
+        )
+        val requests = ClientCalls.asyncClientStreamingCall(call, object : StreamObserver<com.google.protobuf.Empty> {
+            override fun onNext(value: com.google.protobuf.Empty) {}
+            override fun onError(t: Throwable) { done.completeExceptionally(t) }
+            override fun onCompleted() { done.complete(Unit) }
+        })
+        try {
+            try {
+                chunks.forEach { requests.onNext(it) }
+                requests.onCompleted()
+            } catch (e: RuntimeException) {
+                // A call the server already failed rejects further frames; its status is the real error.
+                if (!done.isCompletedExceptionally) throw e
+            }
+            runInterruptible { done.get(35, TimeUnit.SECONDS) }
+        } catch (e: ExecutionException) {
+            throw e.cause ?: e
+        } catch (e: TimeoutException) {
+            throw RuntimeException("speaker did not finish within 35 s", e)
+        } finally {
+            call.cancel("speaker test finished", null)
+        }
+    }
+
+    /** Whether this phone holds the robot's reverse-audio slot, or lost it to another client. */
+    val bridgeStatus: StateFlow<AudioBridgeStatus> get() = audioBridge.status
+
+    private val bridgeConnectMutex = Mutex()
+
+    suspend fun connectBridge(
+        atlasEndpoint: String,
+        micNodeId: String,
+        speakerNodeId: String,
+        takeOver: Boolean = false,
+    ): BridgeConnectResult {
+        if (micNodeId.isBlank() && speakerNodeId.isBlank()) return BridgeConnectResult.NotNeeded
+        val expectedGeneration = audioBridge.connectionGeneration()
+        return bridgeConnectMutex.withLock {
+            var attempt: Long? = null
+            try {
+                val providerId = pickBridgeProvider(micNodeId, speakerNodeId, bridgeProviderIds(atlasEndpoint))
+                    ?: return@withLock BridgeConnectResult.NotNeeded
+                val route = AudioBridgeRoute(atlasEndpoint, providerId)
+                val grpcEndpoint = atlasClient.connectCapability(atlasEndpoint, providerId, CONTRACT_AUDIO_BRIDGE_INFO)
+                val info = try {
+                    bridgeInfo(grpcEndpoint)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    audioBridge.reportAvailability(route, expectedGeneration, AudioBridgePhase.OccupancyUnknown)
+                    throw e
+                }
+                if (!info.reverse || info.endpoint.isBlank()) return@withLock BridgeConnectResult.NotNeeded
+                val url = rewriteWsEndpoint(info.endpoint, atlasEndpoint)
+                val status = bridgeStatus.value
+                val heldByUs = status.connected && status.route == route && status.url == url
+                if (!mayConnectBridge(info.connected, heldByUs, takeOver)) {
+                    audioBridge.reportAvailability(route, expectedGeneration, AudioBridgePhase.Occupied)
+                    return@withLock BridgeConnectResult.Busy(providerId)
+                }
+
+                // Reusing the same connection is safe even if another request connected it while we waited.
+                val generation = if (heldByUs) status.generation else expectedGeneration
+                if (audioBridge.connectionGeneration() != generation) {
+                    return@withLock BridgeConnectResult.Failed("bridge request was superseded")
+                }
+                attempt = audioBridge.connect(route, url, generation, takeOver) {
+                    try {
+                        bridgeInfo(grpcEndpoint).connected
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        null
+                    }
+                } ?: return@withLock BridgeConnectResult.Failed("bridge request was superseded")
+                if (audioBridge.awaitConnected(attempt)) {
+                    BridgeConnectResult.Connected(url)
+                } else {
+                    BridgeConnectResult.Failed("bridge handshake did not complete")
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLog.write("AUDIO", "Bridge connection failed", e)
+                BridgeConnectResult.Failed(e.message ?: "bridge connection failed")
+            } finally {
+                // A successful connection stays open. A failed initial handshake may not connect later.
+                attempt?.let(audioBridge::abandonHandshake)
+            }
+        }
+    }
+
+    private suspend fun bridgeInfo(grpcEndpoint: String): GetAudioBridgeInfo_Response =
+        withContext(Dispatchers.IO) {
+            ClientCalls.blockingUnaryCall(
+                channelProvider.getChannel(grpcEndpoint).newCall(
+                    BRIDGE_INFO_METHOD,
+                    io.grpc.CallOptions.DEFAULT.withDeadlineAfter(5, TimeUnit.SECONDS),
+                ),
+                GetAudioBridgeInfo_Request.newBuilder().build(),
+            )
+        }
+
+    /** Provider ids that are reverse bridges (their devices live on whichever client holds the slot). */
+    suspend fun bridgeProviderIds(atlasEndpoint: String): Set<String> =
+        atlasClient.listAudioProviders(atlasEndpoint).third.map { it.id }.toSet()
+
+    /** Release the robot's slot: the robot host changed, or the route no longer uses a bridge. */
     fun disconnectBridge() {
-        AppLog.write("AUDIO", "Disconnecting AudioBridge")
         audioBridge.disconnect()
     }
 
-    fun isBridgeConnected(): Boolean = audioBridge.isConnected()
+    @Volatile
+    private var appliedRoute: ClientSettings? = null
+
+    fun updateAppliedBridgeRoute(settings: ClientSettings, handsfree: HandsfreeStatus?): Boolean {
+        appliedRoute = settings
+        return releaseBridgeOutsideAppliedRoute(settings.atlasEndpoint, handsfree)
+    }
+
+    fun releaseBridgeOutsideAppliedRoute(atlasEndpoint: String, handsfree: HandsfreeStatus?): Boolean {
+        val settings = appliedRoute?.takeIf { it.atlasEndpoint == atlasEndpoint } ?: return false
+        return releaseBridgeOutsideRoute(atlasEndpoint, settings.micNodeId, settings.speakerNodeId, handsfree)
+    }
+
+    private fun releaseBridgeOutsideRoute(
+        atlasEndpoint: String,
+        micNodeId: String,
+        speakerNodeId: String,
+        handsfree: HandsfreeStatus?,
+    ): Boolean {
+        val route = bridgeStatus.value.route ?: return false
+        if (route.atlasEndpoint != atlasEndpoint || route.providerId == micNodeId || route.providerId == speakerNodeId) return false
+        // Unknown hands-free settings may still refer to this bridge.
+        if (handsfree == null) return false
+        if (handsfree.enabled &&
+            (route.providerId == handsfree.micProviderId || route.providerId == handsfree.speakerProviderId)
+        ) return true
+        audioBridge.disconnect(route)
+        return false
+    }
 
     /**
      * Rewrite loopback WebSocket URLs to use the actual robot host.

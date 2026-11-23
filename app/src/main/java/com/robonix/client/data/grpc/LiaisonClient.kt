@@ -404,7 +404,14 @@ class LiaisonClient @Inject constructor(
     }
 
     private fun mapPlan(plan: com.robonix.proto.pilot.Plan): RtdlPlan {
-        val nodeKindNames = mapOf(0 to "sequence", 1 to "parallel", 2 to "do")
+        val nodeKindNames = mapOf(
+            0 to "sequence",
+            1 to "parallel",
+            2 to "do",
+            3 to "if",
+            4 to "repeat",
+            5 to "while",
+        )
         return RtdlPlan(
             planId = plan.planId,
             sessionId = plan.sessionId,
@@ -419,6 +426,10 @@ class LiaisonClient @Inject constructor(
                     opId = node.opId,
                     description = node.description,
                     call = if (node.hasCall()) mapCapabilityCall(node.call) else null,
+                    conditionJson = node.conditionJson,
+                    bind = node.bind,
+                    repeatCount = node.repeatCount,
+                    maxIterations = node.maxIterations,
                 )
             },
         )
@@ -466,6 +477,8 @@ class LiaisonClient @Inject constructor(
             planId = state.planId,
             opId = state.opId,
             description = state.description,
+            operatorDetail = state.operatorDetail,
+            nodeKind = state.nodeKind,
         )
     }
 }

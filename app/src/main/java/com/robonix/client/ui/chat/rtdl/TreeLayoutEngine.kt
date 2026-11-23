@@ -7,6 +7,14 @@ import com.robonix.client.data.model.RtdlNodeState
 import com.robonix.client.data.model.RtdlPlan
 import kotlin.math.max
 
+enum class EdgeType {
+    NORMAL,
+    IF_TRUE,
+    IF_FALSE,
+    LOOP_ENTRY,
+    LOOP_BACK,
+}
+
 data class LayoutNode(
     val node: RtdlNode,
     val depth: Int,
@@ -18,7 +26,22 @@ data class LayoutNode(
     val stateObj: RtdlNodeState?,
     val parentIndex: Int?,
     val childrenIndices: List<Int>,
+    val isSkipped: Boolean = false,
 ) {
+    internal val displayStatus: RtdlDisplayStatus
+        get() {
+            val leafSuccess = stateObj?.leafResult?.success
+            val normalizedStatus = status.uppercase()
+            return when {
+                isSkipped -> RtdlDisplayStatus.Skipped
+                normalizedStatus in listOf("RUNNING", "ACTIVE", "VERIFYING") -> RtdlDisplayStatus.Running
+                normalizedStatus in listOf("FAILED", "ERROR", "TIMEOUT", "CANCELED", "CANCELLED", "ABORTED") ||
+                    leafSuccess == false -> RtdlDisplayStatus.Failed
+                normalizedStatus in listOf("SUCCEEDED", "SUCCESS") || leafSuccess == true -> RtdlDisplayStatus.Succeeded
+                else -> RtdlDisplayStatus.Pending
+            }
+        }
+
     val left: Float get() = x - width / 2f
     val top: Float get() = y - height / 2f
     val right: Float get() = x + width / 2f
@@ -28,10 +51,22 @@ data class LayoutNode(
     val bottomCenter: Offset get() = Offset(x, bottom)
 }
 
+internal enum class RtdlDisplayStatus(val label: String) {
+    Skipped("rtdl.state.skipped"),
+    Running("rtdl.state.running"),
+    Succeeded("rtdl.state.succeeded"),
+    Failed("rtdl.state.failed"),
+    Pending("rtdl.state.pending"),
+}
+
 data class LayoutEdge(
     val fromNode: LayoutNode,
     val toNode: LayoutNode,
     val isActivePath: Boolean,
+    val edgeType: EdgeType = EdgeType.NORMAL,
+    val label: String = "",
+    val badge: String = "",
+    val isSkipped: Boolean = false,
 )
 
 data class TreeLayoutResult(
@@ -45,7 +80,7 @@ object TreeLayoutEngine {
     const val DEFAULT_NODE_WIDTH = 240f
     const val DEFAULT_NODE_HEIGHT = 50f
     const val DEFAULT_H_GAP = 28f
-    const val DEFAULT_V_GAP = 32f
+    const val DEFAULT_V_GAP = 36f
 
     /**
      * Resolves node statuses matching the web client and RtdlScreen:
@@ -84,9 +119,11 @@ object TreeLayoutEngine {
                     resolved[idx] = "PENDING"
                 } else {
                     val childStatuses = children.map { resolved[it] ?: "PENDING" }
+                    val isIfNode = nodes.find { it.index == idx }?.kind?.equals("if", ignoreCase = true) == true
                     resolved[idx] = when {
                         childStatuses.any { it in listOf("FAILED", "ERROR", "TIMEOUT", "CANCELED", "CANCELLED", "ABORTED") } -> "FAILED"
                         childStatuses.any { it in listOf("RUNNING", "ACTIVE", "VERIFYING") } -> "RUNNING"
+                        isIfNode && childStatuses.any { it in listOf("SUCCEEDED", "SUCCESS") } -> "SUCCEEDED"
                         childStatuses.all { it in listOf("SUCCEEDED", "SUCCESS") } -> "SUCCEEDED"
                         else -> "PENDING"
                     }
@@ -112,9 +149,46 @@ object TreeLayoutEngine {
     }
 
     /**
+     * Finds nodes in skipped branches (e.g., the untaken branch in an IF node).
+     */
+    fun findSkippedNodeIndices(
+        plan: RtdlPlan,
+        nodeStatuses: Map<Int, String>,
+    ): Set<Int> {
+        val skipped = mutableSetOf<Int>()
+        val byIndex = plan.nodes.associateBy { it.index }
+
+        fun markSubtreeSkipped(idx: Int) {
+            if (idx in skipped) return
+            skipped.add(idx)
+            byIndex[idx]?.children?.forEach { markSubtreeSkipped(it) }
+        }
+
+        plan.nodes.forEach { node ->
+            val kind = node.kind.lowercase()
+            if (kind == "if") {
+                val children = node.children.filter { it in byIndex }
+                if (children.size >= 2) {
+                    val s0 = (nodeStatuses[children[0]] ?: "PENDING").uppercase()
+                    val s1 = (nodeStatuses[children[1]] ?: "PENDING").uppercase()
+                    val isRunningOrSuccess0 = s0 in listOf("SUCCEEDED", "SUCCESS", "RUNNING", "ACTIVE", "VERIFYING")
+                    val isRunningOrSuccess1 = s1 in listOf("SUCCEEDED", "SUCCESS", "RUNNING", "ACTIVE", "VERIFYING")
+                    if (isRunningOrSuccess0 && s1 == "PENDING") {
+                        markSubtreeSkipped(children[1])
+                    } else if (isRunningOrSuccess1 && s0 == "PENDING") {
+                        markSubtreeSkipped(children[0])
+                    }
+                }
+            }
+        }
+        return skipped
+    }
+
+    /**
      * Computes 2D coordinates and edges for the behavior tree:
-     * - Sequence, Selector, and Fallback nodes are laid out strictly SERIAL (串行, vertically).
-     * - Parallel nodes are laid out in PARALLEL (并列, horizontally).
+     * - Sequence, Selector, Fallback, Repeat, and While nodes are laid out vertically.
+     * - Parallel and If nodes are laid out horizontally side-by-side.
+     * - Repeat and While nodes generate loop-back edges with iteration badges.
      */
     fun computeLayout(
         plan: RtdlPlan,
@@ -131,6 +205,7 @@ object TreeLayoutEngine {
         val byIndex = plan.nodes.associateBy { it.index }
         val childSet = plan.nodes.flatMap { it.children }.toSet()
         val aggregatedStatus = aggregateNodeStatuses(plan, nodeStates)
+        val skippedIndices = findSkippedNodeIndices(plan, aggregatedStatus)
 
         // Determine root nodes
         val roots = mutableListOf<RtdlNode>()
@@ -164,7 +239,11 @@ object TreeLayoutEngine {
             visited.add(node.index)
             val validChildren = node.children.mapNotNull { byIndex[it] }.filter { it.index !in visited }
             val isParallel = node.kind.equals("parallel", ignoreCase = true) ||
-                node.kind.equals("concurrent", ignoreCase = true)
+                node.kind.equals("concurrent", ignoreCase = true) ||
+                node.kind.equals("if", ignoreCase = true)
+            val isLoop = node.kind.equals("repeat", ignoreCase = true) ||
+                node.kind.equals("while", ignoreCase = true)
+            val loopRailWidth = if (isLoop) 48f else 0f
 
             val childBoxes = validChildren.map { buildBox(it, node.index) }
 
@@ -182,7 +261,7 @@ object TreeLayoutEngine {
             }
 
             if (isParallel) {
-                // Parallel execution: children placed horizontally side-by-side
+                // Parallel or IF execution: children placed horizontally side-by-side
                 val totalChildrenWidth = childBoxes.sumOf { it.width.toDouble() }.toFloat() +
                     (childBoxes.size - 1) * hGap
                 val maxChildrenHeight = childBoxes.maxOf { it.height }
@@ -200,11 +279,11 @@ object TreeLayoutEngine {
                     parentIndex = parentIdx,
                 )
             } else {
-                // Serial execution (Sequence / Selector / Fallback): children placed vertically in sequence
+                // Serial execution (Sequence / Selector / Loop): children placed vertically
                 val maxChildrenWidth = childBoxes.maxOf { it.width }
                 val totalChildrenHeight = childBoxes.sumOf { it.height.toDouble() }.toFloat() +
                     (childBoxes.size - 1) * vGap
-                val subtreeWidth = max(nodeWidth, maxChildrenWidth)
+                val subtreeWidth = max(nodeWidth, maxChildrenWidth) + loopRailWidth
                 val subtreeHeight = nodeHeight + vGap + totalChildrenHeight
 
                 return SubtreeBox(
@@ -213,7 +292,7 @@ object TreeLayoutEngine {
                     isParallel = false,
                     width = subtreeWidth,
                     height = subtreeHeight,
-                    relativeCenterX = subtreeWidth / 2f,
+                    relativeCenterX = (subtreeWidth - loopRailWidth) / 2f,
                     relativeCenterY = nodeHeight / 2f,
                     parentIndex = parentIdx,
                 )
@@ -223,8 +302,16 @@ object TreeLayoutEngine {
         val rootBoxes = roots.map { buildBox(it, null) }
 
         // Compute absolute positions & construct edges
+        data class RawEdge(
+            val fromIndex: Int,
+            val toIndex: Int,
+            val edgeType: EdgeType = EdgeType.NORMAL,
+            val label: String = "",
+            val badge: String = "",
+        )
+
         val layoutNodes = mutableListOf<LayoutNode>()
-        val rawEdges = mutableListOf<Triple<Int, Int, Boolean>>() // fromIndex, toIndex, isParentChild
+        val rawEdges = mutableListOf<RawEdge>()
 
         fun placeBoxes(box: SubtreeBox, leftX: Float, topY: Float, depth: Int) {
             val centerX = leftX + box.relativeCenterX
@@ -245,36 +332,55 @@ object TreeLayoutEngine {
                 stateObj = rawState,
                 parentIndex = box.parentIndex,
                 childrenIndices = box.children.map { it.node.index },
+                isSkipped = box.node.index in skippedIndices,
             )
             layoutNodes.add(lNode)
 
             if (box.children.isEmpty()) return
 
             if (box.isParallel) {
-                // Parallel: children laid out horizontally side-by-side
+                val isIf = box.node.kind.equals("if", ignoreCase = true)
                 val totalChildrenWidth = box.children.sumOf { it.width.toDouble() }.toFloat() +
                     (box.children.size - 1) * hGap
                 val childrenSpanStart = leftX + (box.width - totalChildrenWidth) / 2f
                 val childTop = topY + nodeHeight + vGap
 
                 var childLeft = childrenSpanStart
-                box.children.forEach { cBox ->
+                box.children.forEachIndexed { i, cBox ->
                     placeBoxes(cBox, childLeft, childTop, depth + 1)
-                    rawEdges.add(Triple(box.node.index, cBox.node.index, true))
+                    if (isIf) {
+                        val edgeType = if (i == 0) EdgeType.IF_TRUE else EdgeType.IF_FALSE
+                        val label = if (i == 0) "✓ True" else "✗ False"
+                        rawEdges.add(RawEdge(box.node.index, cBox.node.index, edgeType, label))
+                    } else {
+                        rawEdges.add(RawEdge(box.node.index, cBox.node.index, EdgeType.NORMAL))
+                    }
                     childLeft += cBox.width + hGap
                 }
             } else {
-                // Serial (Sequence / Selector): children laid out vertically in order
+                val isLoop = box.node.kind.equals("repeat", ignoreCase = true) ||
+                    box.node.kind.equals("while", ignoreCase = true)
+                val contentWidth = box.width - if (isLoop) 48f else 0f
                 var childTop = topY + nodeHeight + vGap
                 var previousNodeIndex = box.node.index
 
                 box.children.forEachIndexed { i, cBox ->
-                    val childLeft = leftX + (box.width - cBox.width) / 2f
+                    val childLeft = leftX + (contentWidth - cBox.width) / 2f
                     placeBoxes(cBox, childLeft, childTop, depth + 1 + i)
 
-                    // Serial execution edge from previous node to this node
-                    rawEdges.add(Triple(previousNodeIndex, cBox.node.index, i == 0))
-                    previousNodeIndex = cBox.node.index
+                    if (isLoop) {
+                        rawEdges.add(RawEdge(box.node.index, cBox.node.index, EdgeType.LOOP_ENTRY))
+                        val loopBadge = when {
+                            box.node.repeatCount > 0 -> "×${box.node.repeatCount}"
+                            box.node.maxIterations > 0 -> "≤${box.node.maxIterations}"
+                            box.node.kind.equals("while", ignoreCase = true) -> "↻"
+                            else -> "↺"
+                        }
+                        rawEdges.add(RawEdge(cBox.node.index, box.node.index, EdgeType.LOOP_BACK, badge = loopBadge))
+                    } else {
+                        rawEdges.add(RawEdge(previousNodeIndex, cBox.node.index, EdgeType.NORMAL))
+                        previousNodeIndex = cBox.node.index
+                    }
 
                     childTop += cBox.height + vGap
                 }
@@ -303,15 +409,26 @@ object TreeLayoutEngine {
         }
 
         // Construct LayoutEdges
-        val edges = rawEdges.mapNotNull { (fromIdx, toIdx, _) ->
-            val fromNode = nodesByIndex[fromIdx]
-            val toNode = nodesByIndex[toIdx]
+        val edges = rawEdges.mapNotNull { raw ->
+            val fromNode = nodesByIndex[raw.fromIndex]
+            val toNode = nodesByIndex[raw.toIndex]
             if (fromNode != null && toNode != null) {
                 // Active if leading directly into an active/running node
                 val isRunningTarget = toNode.status.uppercase() in listOf("RUNNING", "ACTIVE", "VERIFYING")
                 val isRunningSource = fromNode.status.uppercase() in listOf("RUNNING", "ACTIVE", "VERIFYING")
                 val isActive = isRunningTarget || (isRunningSource && toNode.status.uppercase() !in listOf("FAILED", "ERROR"))
-                LayoutEdge(fromNode, toNode, isActive)
+                val isEdgeSkipped = toNode.isSkipped ||
+                    (raw.edgeType == EdgeType.IF_TRUE && fromNode.childrenIndices.getOrNull(0)?.let { it in skippedIndices } == true) ||
+                    (raw.edgeType == EdgeType.IF_FALSE && fromNode.childrenIndices.getOrNull(1)?.let { it in skippedIndices } == true)
+                LayoutEdge(
+                    fromNode = fromNode,
+                    toNode = toNode,
+                    isActivePath = isActive,
+                    edgeType = raw.edgeType,
+                    label = raw.label,
+                    badge = raw.badge,
+                    isSkipped = isEdgeSkipped,
+                )
             } else null
         }
 

@@ -1,6 +1,6 @@
 package com.robonix.client.domain
 
-import android.util.Log
+import com.robonix.client.AppLog
 import com.robonix.client.data.model.BatchResult
 import com.robonix.client.data.model.RtdlNodeState
 import com.robonix.client.data.model.RtdlPlan
@@ -46,6 +46,8 @@ class RtdlStateHolder @Inject constructor() {
         _selectedTaskId.value = taskId
     }
 
+    private var lastLoggedUpdate = ""
+
     fun update(
         plan: RtdlPlan?,
         nodeStates: Map<Int, RtdlNodeState>,
@@ -53,8 +55,13 @@ class RtdlStateHolder @Inject constructor() {
         records: List<PlanRecord>,
         taskState: TaskState? = null,
     ) {
-        Log.w("RobonixRtdl", "RtdlStateHolder.update: plan=${plan?.planId} nodes=${plan?.nodes?.size} " +
-            "nodeStates=${nodeStates.size} batches=${batches.size} records=${records.size}")
+        val states = nodeStates.values.groupingBy { it.state }.eachCount().toSortedMap()
+        val summary = "plan=${plan?.planId} nodes=${plan?.nodes?.size} states=$states " +
+            "batches=${batches.size} records=${records.size} task=${taskState?.status}"
+        if (summary != lastLoggedUpdate) {
+            lastLoggedUpdate = summary
+            AppLog.write("RTDL", "update $summary")
+        }
         _livePlan.value = plan
         _liveNodeStates.value = nodeStates
         _liveBatches.value = batches

@@ -7,7 +7,13 @@ import dagger.hilt.android.HiltAndroidApp
 class RobonixApp : Application() {
     override fun onCreate() {
         super.onCreate()
-        AppLog.init(cacheDir.resolve("logs"))
+        AppLog.init(this)
+        AppLogHooks.install(this)
         AppLog.write("APP", "RobonixApp onCreate")
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        AppLogHooks.onTrimMemory(level)
     }
 }

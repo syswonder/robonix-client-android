@@ -1,7 +1,6 @@
 package com.robonix.client
 
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -25,15 +24,8 @@ import dagger.hilt.android.AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Uncaught exceptions are written to the log file by AppLogHooks (RobonixApp).
         AppLog.write("UI", "MainActivity onCreate")
-
-        // Global uncaught exception handler — ensures even compose rendering
-        // crashes are logged before the process dies.
-        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            Log.e("RobonixCrash", "FATAL on ${thread.name}", throwable)
-            defaultHandler?.uncaughtException(thread, throwable)
-        }
 
         enableEdgeToEdge()
         setContent {

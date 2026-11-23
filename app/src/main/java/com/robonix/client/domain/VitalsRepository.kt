@@ -1,6 +1,6 @@
 package com.robonix.client.domain
 
-import android.util.Log
+import com.robonix.client.AppLog
 import com.robonix.client.data.grpc.AtlasClient
 import com.robonix.client.data.grpc.GrpcChannelProvider
 import com.robonix.client.data.model.ModuleHealth
@@ -35,9 +35,16 @@ class VitalsRepository @Inject constructor(
             .setResponseMarshaller(ProtoUtils.marshaller(GetModuleHealthSnapshot_Response.getDefaultInstance()))
             .build()
 
+    /** Last resolved endpoint, so the 3 s poll logs only when it changes. */
+    @Volatile
+    private var lastEndpoint: String? = null
+
     suspend fun getModuleHealthSnapshot(atlasEndpoint: String): List<ModuleHealth> {
         val endpoint = atlasClient.discoverEndpoint(atlasEndpoint, CONTRACT_VITALS_MODULES_GET)
-        Log.w("RobonixVitals", "atlas=$atlasEndpoint resolved endpoint=$endpoint")
+        if (endpoint != lastEndpoint) {
+            lastEndpoint = endpoint
+            AppLog.write("VITALS", "modules atlas=$atlasEndpoint resolved endpoint=$endpoint")
+        }
         return withContext(Dispatchers.IO) {
             val channel = channelProvider.getChannel(endpoint)
             val response = ClientCalls.blockingUnaryCall(

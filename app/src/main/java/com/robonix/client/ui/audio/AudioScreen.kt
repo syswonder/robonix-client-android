@@ -26,15 +26,26 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.robonix.client.data.audio.AudioBridge
 import com.robonix.client.data.audio.AudioBridgeEvent
-import com.robonix.client.data.audio.AudioPlayer
+import com.robonix.client.data.audio.AudioBridgePhase
+import com.robonix.client.data.audio.AudioBridgeStatus
 import com.robonix.client.data.model.*
+import com.robonix.client.domain.ActiveDevice
 import com.robonix.client.domain.AudioRepository
+import com.robonix.client.domain.BridgeConnectResult
+import com.robonix.client.domain.CaptureVerdict
+import com.robonix.client.domain.hasSameAudioRoute
+import com.robonix.client.domain.judgeCapture
+import com.robonix.client.domain.peakDbfs
+import com.robonix.client.domain.selectionPending
+import com.robonix.client.ui.components.BridgeTakeoverDialog
 import com.robonix.client.ui.i18n.AppStrings
 import com.robonix.client.ui.i18n.t
 import com.robonix.client.ui.i18n.tStatus
 import com.robonix.client.ui.navigation.SharedViewModel
 import com.robonix.client.ui.theme.*
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -51,6 +62,8 @@ data class AudioUiState(
     val selectedSpeakerDevice: String = "",
     val micDevices: List<AudioDevice> = emptyList(),
     val speakerDevices: List<AudioDevice> = emptyList(),
+    val currentMicDevice: String = "",
+    val currentSpeakerDevice: String = "",
     val devicesBusy: Boolean = false,
     val applyStatus: String = "",
     val applyOk: Boolean? = null,
@@ -62,20 +75,23 @@ data class AudioUiState(
     val testStatus: String = "",
     val testResultClass: TestResultClass = TestResultClass.None,
     val isBusy: Boolean = false,
-    val bridgeConnected: Boolean = false,
+    val bridgeTakeoverPrompt: Boolean = false,
+    val bridgeBusy: Boolean = false,
+    val bridgeMessage: String = "",
     val isRecording: Boolean = false,
     val enrollUserId: String = "",
     val enrollStatus: String = "",
     val enrollBusy: Boolean = false,
 )
 
-enum class TestResultClass { None, Success, Error }
+enum class TestResultClass { None, Success, Warning, Error }
+
+private const val SPEAKER_TEST_PHRASE = "Robonix speaker test. 如果你听到这句话，语音播放链路正常。"
 
 @HiltViewModel
 class AudioViewModel @Inject constructor(
     val audioRepository: AudioRepository,
     val handsfree: com.robonix.client.domain.HandsfreeStateHolder,
-    private val audioPlayer: AudioPlayer,
     private val audioBridge: AudioBridge,
 ) : ViewModel() {
 
@@ -87,20 +103,99 @@ class AudioViewModel @Inject constructor(
     /** Keep baked status strings in sync with the selected language. */
     fun setLanguage(value: String) { lang = value }
 
-    /** Toggle hands-free mode; blocked while a push-to-talk session runs. */
-    fun toggleHandsfree(settings: ClientSettings) {
-        if (handsfree.busy.value || handsfree.voiceBusy.value) return
+    /** Whether this phone holds the robot's audio bridge, or was replaced by another client. */
+    val bridgeStatus: StateFlow<AudioBridgeStatus> get() = audioRepository.bridgeStatus
+
+    private data class PendingTakeover(
+        val settings: ClientSettings,
+        val micNodeId: String,
+        val speakerNodeId: String,
+        val resume: (suspend () -> Unit)?,
+    )
+
+    private var pendingTakeover: PendingTakeover? = null
+    private var handsfreeToggleJob: Job? = null
+
+    fun connectBridge(settings: ClientSettings) {
+        viewModelScope.launch { ensureBridge(settings) }
+    }
+
+    fun disconnectBridge() {
+        dismissBridgeTakeover()
+        audioRepository.disconnectBridge()
+        _uiState.update { it.copy(bridgeMessage = "") }
+    }
+
+    fun dismissBridgeTakeover() {
+        pendingTakeover = null
+        _uiState.update { it.copy(bridgeTakeoverPrompt = false) }
+    }
+
+    fun confirmBridgeTakeover(settings: ClientSettings) {
+        val pending = pendingTakeover ?: return
+        dismissBridgeTakeover()
+        if (!pending.settings.hasSameAudioRoute(settings)) return
         viewModelScope.launch {
-            val target = settings.atlasEndpoint
-            if (target.isBlank()) return@launch
-            val next = !(handsfree.status.value?.enabled ?: false)
-            handsfree.setEnabled(
-                target = target,
-                enabled = next,
-                micProviderId = settings.micNodeId,
-                speakerProviderId = settings.speakerNodeId,
+            if (ensureBridge(pending.settings, pending.micNodeId, pending.speakerNodeId, takeOver = true)) {
+                pending.resume?.invoke()
+            }
+        }
+    }
+
+    private suspend fun ensureBridge(
+        settings: ClientSettings,
+        micNodeId: String = settings.micNodeId,
+        speakerNodeId: String = settings.speakerNodeId,
+        takeOver: Boolean = false,
+        resume: (suspend () -> Unit)? = null,
+    ): Boolean {
+        if (settings.atlasEndpoint.isBlank() || _uiState.value.bridgeBusy) return false
+        dismissBridgeTakeover()
+        _uiState.update { it.copy(bridgeBusy = true, bridgeMessage = "") }
+        val result = try {
+            audioRepository.connectBridge(settings.atlasEndpoint, micNodeId, speakerNodeId, takeOver)
+        } finally {
+            _uiState.update { it.copy(bridgeBusy = false) }
+        }
+        if (result is BridgeConnectResult.Busy) {
+            pendingTakeover = PendingTakeover(settings, micNodeId, speakerNodeId, resume)
+        }
+        _uiState.update {
+            it.copy(
+                bridgeTakeoverPrompt = result is BridgeConnectResult.Busy,
+                bridgeMessage = (result as? BridgeConnectResult.Failed)
+                    ?.let { f -> AppStrings.format(lang, "audio.bridge.failed", f.reason) } ?: "",
             )
-            handsfree.refreshOnce(target)
+        }
+        addLog("bridge: $result")
+        return result is BridgeConnectResult.Connected || result is BridgeConnectResult.NotNeeded
+    }
+
+    fun toggleHandsfree(settings: ClientSettings) {
+        if (handsfree.busy.value || handsfree.voiceBusy.value || _uiState.value.bridgeBusy ||
+            handsfreeToggleJob?.isActive == true || settings.atlasEndpoint.isBlank()
+        ) return
+        handsfreeToggleJob = viewModelScope.launch {
+            val enabled = handsfree.refreshOnce(settings.atlasEndpoint)?.enabled ?: return@launch
+            if (enabled) {
+                updateHandsfree(settings, enabled = false)
+            } else {
+                val enable: suspend () -> Unit = { updateHandsfree(settings, enabled = true) }
+                if (ensureBridge(settings, resume = enable)) enable()
+            }
+        }
+    }
+
+    private suspend fun updateHandsfree(settings: ClientSettings, enabled: Boolean) {
+        val target = settings.atlasEndpoint
+        val changed = if (enabled) {
+            handsfree.setEnabled(target, true, settings.micNodeId, settings.speakerNodeId)
+        } else {
+            handsfree.setEnabled(target, false, "", "")
+        }
+        if (changed) {
+            val status = handsfree.refreshOnce(target)
+            audioRepository.releaseBridgeOutsideAppliedRoute(target, status)
         }
     }
 
@@ -157,13 +252,14 @@ class AudioViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     micDevices = inputs,
+                    currentMicDevice = list.currentInputId,
                     selectedMicDevice = it.selectedMicDevice.ifBlank { preferred },
                     devicesBusy = false,
                 )
             }
             addLog("mic devices (${providerId}): ${list.devices.size}")
         } catch (e: Exception) {
-            _uiState.update { it.copy(micDevices = emptyList(), devicesBusy = false) }
+            _uiState.update { it.copy(micDevices = emptyList(), currentMicDevice = "", devicesBusy = false) }
             addLog("mic devices failed: ${e.message}")
         }
     }
@@ -178,24 +274,25 @@ class AudioViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     speakerDevices = outputs,
+                    currentSpeakerDevice = list.currentOutputId,
                     selectedSpeakerDevice = it.selectedSpeakerDevice.ifBlank { preferred },
                     devicesBusy = false,
                 )
             }
             addLog("speaker devices (${providerId}): ${list.devices.size}")
         } catch (e: Exception) {
-            _uiState.update { it.copy(speakerDevices = emptyList(), devicesBusy = false) }
+            _uiState.update { it.copy(speakerDevices = emptyList(), currentSpeakerDevice = "", devicesBusy = false) }
             addLog("speaker devices failed: ${e.message}")
         }
     }
 
     fun selectMicProvider(target: String, id: String) {
-        _uiState.update { it.copy(selectedMicProvider = id, selectedMicDevice = "", micDevices = emptyList()) }
+        _uiState.update { it.copy(selectedMicProvider = id, selectedMicDevice = "", micDevices = emptyList(), currentMicDevice = "") }
         if (id.isNotBlank()) viewModelScope.launch { loadMicDevices(target, id) }
     }
 
     fun selectSpeakerProvider(target: String, id: String) {
-        _uiState.update { it.copy(selectedSpeakerProvider = id, selectedSpeakerDevice = "", speakerDevices = emptyList()) }
+        _uiState.update { it.copy(selectedSpeakerProvider = id, selectedSpeakerDevice = "", speakerDevices = emptyList(), currentSpeakerDevice = "") }
         if (id.isNotBlank()) viewModelScope.launch { loadSpeakerDevices(target, id) }
     }
 
@@ -203,7 +300,7 @@ class AudioViewModel @Inject constructor(
     fun selectSpeakerDevice(id: String) { _uiState.update { it.copy(selectedSpeakerDevice = id) } }
 
     /** Push the configured mic/speaker route to the robot (web Apply button). */
-    fun applyRoute(settings: ClientSettings) {
+    fun applyRoute(settings: ClientSettings, onApplied: (ClientSettings) -> Unit) {
         val target = settings.atlasEndpoint
         if (target.isBlank()) {
             _uiState.update { it.copy(applyStatus = AppStrings.format(lang, "chat.configure.first"), applyOk = false) }
@@ -219,13 +316,22 @@ class AudioViewModel @Inject constructor(
                     micNodeId = settings.micNodeId, micDeviceId = settings.micDeviceId,
                     speakerNodeId = settings.speakerNodeId, speakerDeviceId = settings.speakerDeviceId,
                 )
+                onApplied(settings)
+                val holdsOldRoute = audioRepository.updateAppliedBridgeRoute(settings, handsfree.refreshOnce(target))
                 _uiState.update {
                     it.copy(
                         isBusy = false, applyOk = true,
-                        applyStatus = AppStrings.format(lang, "audio.route.applied", count),
+                        applyStatus = AppStrings.format(
+                            lang, if (holdsOldRoute) "audio.route.applied.handsfree" else "audio.route.applied", count,
+                        ),
                     )
                 }
                 addLog("route applied: $count device(s)")
+                // Re-read what the providers now use, so the in-use marks follow the apply.
+                if (settings.micNodeId.isNotBlank()) loadMicDevices(target, settings.micNodeId)
+                if (settings.speakerNodeId.isNotBlank()) loadSpeakerDevices(target, settings.speakerNodeId)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
@@ -269,40 +375,128 @@ class AudioViewModel @Inject constructor(
         }
     }
 
-    fun testMicrophone() {
-        _uiState.update { it.copy(isBusy = true, testStatus = AppStrings.format(lang, "audio.diag.capturing"), testResultClass = TestResultClass.None) }
+    /**
+     * Capture ~1 s through the robot's current mic route, the path ASR and voiceprint use.
+     * A bridge route needs this phone to hold the bridge first, or the robot hears another client.
+     */
+    fun testMicrophone(settings: ClientSettings) {
+        if (_uiState.value.isBusy) return
+        val target = settings.atlasEndpoint
+        if (target.isBlank()) {
+            setTestResult(AppStrings.format(lang, "chat.configure.first"), TestResultClass.Error)
+            return
+        }
+        val hf = handsfree.status.value
+        if (hf?.enabled == true && hf.micProviderId == settings.micNodeId) {
+            setTestResult(AppStrings.format(lang, "audio.diag.mic.hf"), TestResultClass.Error)
+            return
+        }
+        _uiState.update {
+            it.copy(isBusy = true, testStatus = AppStrings.format(lang, "audio.diag.capturing"), testResultClass = TestResultClass.None)
+        }
         viewModelScope.launch {
             try {
-                val pcm = audioRepository.recordForDuration(1.0f)
-                val rms = pcmRms(pcm)
-                _uiState.update {
-                    it.copy(
-                        isBusy = false,
-                        testStatus = AppStrings.format(lang, "audio.diag.mic.ok", pcm.size, "%.4f".format(rms)),
-                        testResultClass = TestResultClass.Success,
-                    )
+                if (!holdBridgeForTest(settings, micNodeId = settings.micNodeId) { testMicrophone(settings) }) {
+                    return@launch
                 }
-                addLog("mic test: ${pcm.size}B, RMS=${"%.4f".format(rms)}")
+                val result = audioRepository.testMicRoute(target, settings.micNodeId, 1f)
+                val device = audioRepository.activeDevice(target, settings.micNodeId, "input")
+                val stats = result.stats
+                val verdict = judgeCapture(stats)
+                val measured = AppStrings.format(
+                    lang, "audio.diag.mic.ok",
+                    result.bytes, result.captureMs, "%.4f".format(Locale.US, stats.rms),
+                    peakDbfs(stats.peak)?.toString() ?: "-∞",
+                )
+                val (text, level) = when (verdict) {
+                    CaptureVerdict.Empty -> AppStrings.format(lang, "audio.diag.mic.empty") to TestResultClass.Error
+                    CaptureVerdict.Silent -> AppStrings.format(lang, "audio.diag.mic.silent") to TestResultClass.Error
+                    CaptureVerdict.NearSilence ->
+                        "$measured · ${AppStrings.format(lang, "audio.diag.mic.near_silence")}" to TestResultClass.Warning
+                    CaptureVerdict.Ok -> measured to TestResultClass.Success
+                }
+                setTestResult(text + deviceSuffix(device), level)
+                addLog("mic test: $verdict ${result.bytes}B in ${result.captureMs}ms peak=${stats.peak} device=${device?.id}")
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        isBusy = false,
-                        testStatus = AppStrings.format(lang, "audio.diag.failed", e.message ?: ""),
-                        testResultClass = TestResultClass.Error,
-                    )
-                }
+                setTestResult(AppStrings.format(lang, "audio.diag.failed", e.message ?: ""), TestResultClass.Error)
+                addLog("mic test failed: ${e.message}")
             }
         }
     }
 
-    fun testSpeaker() {
-        _uiState.update { it.copy(isBusy = true, testStatus = AppStrings.format(lang, "audio.diag.tone")) }
-        addLog("speaker test: playing 440Hz tone")
-        val tone = generateTestTone(440f, 0.4f, 16000)
-        audioPlayer.play(tone)
-        _uiState.update {
-            it.copy(isBusy = false, testStatus = AppStrings.format(lang, "audio.diag.tone.ok"), testResultClass = TestResultClass.Success)
+    /**
+     * Synthesize a phrase and play it through the robot's current speaker route. Completing
+     * only means the speaker accepted the audio: the robot-side driver does not report playback
+     * failures, so the result asks the user whether they heard it.
+     */
+    fun testSpeaker(settings: ClientSettings) {
+        if (_uiState.value.isBusy) return
+        val target = settings.atlasEndpoint
+        if (target.isBlank()) {
+            setTestResult(AppStrings.format(lang, "chat.configure.first"), TestResultClass.Error)
+            return
         }
+        _uiState.update {
+            it.copy(isBusy = true, testStatus = AppStrings.format(lang, "audio.diag.spk.sending"), testResultClass = TestResultClass.None)
+        }
+        viewModelScope.launch {
+            try {
+                if (!holdBridgeForTest(settings, speakerNodeId = settings.speakerNodeId) { testSpeaker(settings) }) {
+                    return@launch
+                }
+                val result = audioRepository.testSpeakerRoute(
+                    atlasEndpoint = target,
+                    speakerNodeId = settings.speakerNodeId,
+                    ttsNodeId = settings.ttsNodeId,
+                    text = SPEAKER_TEST_PHRASE,
+                )
+                val device = audioRepository.activeDevice(target, settings.speakerNodeId, "output")
+                setTestResult(
+                    AppStrings.format(lang, "audio.diag.spk.sent", result.bytes) + deviceSuffix(device) +
+                        " · " + AppStrings.format(lang, "audio.diag.spk.heard"),
+                    TestResultClass.Success,
+                )
+                addLog("speaker test: sent ${result.bytes}B at ${result.sampleRateHz}Hz device=${device?.id}")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                setTestResult(AppStrings.format(lang, "audio.diag.failed", e.message ?: ""), TestResultClass.Error)
+                addLog("speaker test failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * False when the test cannot run yet. If another client holds the bridge, the takeover
+     * prompt is shown and [retry] runs after the user confirms.
+     */
+    private suspend fun holdBridgeForTest(
+        settings: ClientSettings,
+        micNodeId: String = "",
+        speakerNodeId: String = "",
+        retry: () -> Unit,
+    ): Boolean {
+        if (ensureBridge(settings, micNodeId, speakerNodeId, resume = retry)) return true
+        val state = _uiState.value
+        if (state.bridgeTakeoverPrompt) {
+            _uiState.update { it.copy(isBusy = false, testStatus = "", testResultClass = TestResultClass.None) }
+        } else {
+            val reason = state.bridgeMessage.ifBlank { AppStrings.format(lang, "audio.bridge.failed", "") }
+            setTestResult(reason, TestResultClass.Error)
+        }
+        return false
+    }
+
+    private fun setTestResult(text: String, level: TestResultClass) {
+        _uiState.update { it.copy(isBusy = false, testStatus = text, testResultClass = level) }
+    }
+
+    private fun deviceSuffix(device: ActiveDevice?): String {
+        if (device == null) return ""
+        val name = device.name.ifBlank { AppStrings.format(lang, "audio.device.os_default") }
+        return " · " + AppStrings.format(lang, "audio.diag.device", name)
     }
 
     fun startRecording() {
@@ -335,16 +529,6 @@ class AudioViewModel @Inject constructor(
         }
         return if (n > 0) (Math.sqrt(sum / n) / 32768.0).toFloat() else 0f
     }
-
-    private fun generateTestTone(freq: Float, dur: Float, rate: Int): ByteArray {
-        val n = (rate * dur).toInt()
-        val out = ByteArray(n * 2)
-        for (i in 0 until n) {
-            val v = (Math.sin(2.0 * Math.PI * freq * i / rate) * 8000).toInt().toShort()
-            out[i * 2] = v.toInt().toByte(); out[i * 2 + 1] = (v.toInt() shr 8).toByte()
-        }
-        return out
-    }
 }
 
 @Composable
@@ -358,13 +542,16 @@ fun AudioScreen(
     val handsfreeBusy by viewModel.handsfree.busy.collectAsState()
     val handsfreeError by viewModel.handsfree.error.collectAsState()
     val voiceBusy by viewModel.handsfree.voiceBusy.collectAsState()
+    val bridge by viewModel.bridgeStatus.collectAsState()
     val context = LocalContext.current
+    val micCurrent = state.currentDevice(settings, bridge, state.selectedMicProvider, state.currentMicDevice)
+    val speakerCurrent = state.currentDevice(settings, bridge, state.selectedSpeakerProvider, state.currentSpeakerDevice)
 
     // Permission launchers
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) viewModel.testMicrophone()
+        if (granted) viewModel.testMicrophone(settings)
     }
     val enrollPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -408,7 +595,7 @@ fun AudioScreen(
                     state.selectedMicProvider,
                     { id ->
                         viewModel.selectMicProvider(settings.atlasEndpoint, id)
-                        sharedViewModel.updateSettings { it.copy(micNodeId = id) }
+                        sharedViewModel.updateSettings { it.copy(micNodeId = id, micDeviceId = "") }
                     },
                     t("audio.route.select.input"),
                 )
@@ -417,7 +604,7 @@ fun AudioScreen(
                 // Input device (from the selected provider)
                 Text(t("audio.route.device.input"), color = Muted, fontSize = 11.sp)
                 Dropdown(
-                    state.micDevices.associate { it.id to it.name.ifBlank { it.id } },
+                    deviceOptions(state.micDevices, micCurrent),
                     state.selectedMicDevice,
                     { id ->
                         viewModel.selectMicDevice(id)
@@ -425,6 +612,7 @@ fun AudioScreen(
                     },
                     if (state.devicesBusy) t("audio.route.device.loading") else t("audio.route.device.none"),
                 )
+                DevicePendingHint(state.micDevices, state.selectedMicDevice, micCurrent)
                 Spacer(Modifier.height(6.dp))
 
                 // Output provider
@@ -434,7 +622,7 @@ fun AudioScreen(
                     state.selectedSpeakerProvider,
                     { id ->
                         viewModel.selectSpeakerProvider(settings.atlasEndpoint, id)
-                        sharedViewModel.updateSettings { it.copy(speakerNodeId = id) }
+                        sharedViewModel.updateSettings { it.copy(speakerNodeId = id, speakerDeviceId = "") }
                     },
                     t("audio.route.select.output"),
                 )
@@ -443,7 +631,7 @@ fun AudioScreen(
                 // Output device
                 Text(t("audio.route.device.output"), color = Muted, fontSize = 11.sp)
                 Dropdown(
-                    state.speakerDevices.associate { it.id to it.name.ifBlank { it.id } },
+                    deviceOptions(state.speakerDevices, speakerCurrent),
                     state.selectedSpeakerDevice,
                     { id ->
                         viewModel.selectSpeakerDevice(id)
@@ -451,7 +639,14 @@ fun AudioScreen(
                     },
                     if (state.devicesBusy) t("audio.route.device.loading") else t("audio.route.device.none"),
                 )
+                DevicePendingHint(state.speakerDevices, state.selectedSpeakerDevice, speakerCurrent)
                 Spacer(Modifier.height(10.dp))
+
+                BridgeControls(
+                    settings, state, bridge,
+                    onConnect = { viewModel.connectBridge(sharedViewModel.settings.value) },
+                    onDisconnect = viewModel::disconnectBridge,
+                )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
@@ -469,8 +664,7 @@ fun AudioScreen(
                     }
                     Button(
                         onClick = {
-                            sharedViewModel.saveSettings()
-                            viewModel.applyRoute(sharedViewModel.settings.value)
+                            viewModel.applyRoute(sharedViewModel.settings.value, sharedViewModel::saveSettings)
                         },
                         enabled = !state.isBusy,
                         modifier = Modifier.weight(1f),
@@ -537,7 +731,7 @@ fun AudioScreen(
                     Switch(
                         checked = handsfreeStatus?.enabled == true,
                         onCheckedChange = { viewModel.toggleHandsfree(sharedViewModel.settings.value) },
-                        enabled = !handsfreeBusy && !voiceBusy,
+                        enabled = !handsfreeBusy && !voiceBusy && !state.bridgeBusy,
                         colors = SwitchDefaults.colors(
                             checkedTrackColor = Green,
                             checkedThumbColor = Bg,
@@ -575,7 +769,7 @@ fun AudioScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton(
                         onClick = {
-                            if (hasPerm) viewModel.testMicrophone()
+                            if (hasPerm) viewModel.testMicrophone(settings)
                             else permLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         },
                         enabled = !state.isBusy,
@@ -587,7 +781,7 @@ fun AudioScreen(
                         Text(t("audio.diag.mic"), fontSize = 12.sp)
                     }
                     FilledTonalButton(
-                        onClick = { viewModel.testSpeaker() },
+                        onClick = { viewModel.testSpeaker(settings) },
                         enabled = !state.isBusy,
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(8.dp),
@@ -603,6 +797,7 @@ fun AudioScreen(
                     Surface(
                         color = when (state.testResultClass) {
                             TestResultClass.Success -> Green.copy(alpha = 0.1f)
+                            TestResultClass.Warning -> Amber.copy(alpha = 0.1f)
                             TestResultClass.Error -> Red.copy(alpha = 0.1f)
                             TestResultClass.None -> Panel2
                         },
@@ -612,12 +807,14 @@ fun AudioScreen(
                             Icon(
                                 when (state.testResultClass) {
                                     TestResultClass.Success -> Icons.Default.CheckCircle
+                                    TestResultClass.Warning -> Icons.Default.Warning
                                     TestResultClass.Error -> Icons.Default.Error
                                     TestResultClass.None -> Icons.Default.Info
                                 },
                                 null,
                                 tint = when (state.testResultClass) {
                                     TestResultClass.Success -> Green
+                                    TestResultClass.Warning -> Amber
                                     TestResultClass.Error -> Red
                                     TestResultClass.None -> Muted
                                 },
@@ -726,6 +923,13 @@ fun AudioScreen(
 
         item { Spacer(Modifier.height(32.dp)) }
     }
+
+    if (state.bridgeTakeoverPrompt) {
+        BridgeTakeoverDialog(
+            onConfirm = { viewModel.confirmBridgeTakeover(sharedViewModel.settings.value) },
+            onDismiss = { viewModel.dismissBridgeTakeover() },
+        )
+    }
 }
 
 @Composable
@@ -744,6 +948,91 @@ private fun PanelCard(title: String, subtitle: String = "", content: @Composable
             content()
         }
     }
+}
+
+internal fun AudioUiState.currentDevice(
+    settings: ClientSettings,
+    bridge: AudioBridgeStatus,
+    providerId: String,
+    deviceId: String,
+): String? {
+    if (bridgeProviders.none { it.id == providerId }) return deviceId
+    return deviceId.takeIf {
+        bridge.connected && bridge.route?.atlasEndpoint == settings.atlasEndpoint &&
+            bridge.route.providerId == providerId
+    }
+}
+
+@Composable
+internal fun BridgeControls(
+    settings: ClientSettings,
+    audioState: AudioUiState,
+    bridge: AudioBridgeStatus,
+    onConnect: () -> Unit,
+    onDisconnect: () -> Unit,
+) {
+    val selectedProvider = audioState.bridgeProviders.firstOrNull {
+        it.id == settings.micNodeId
+    } ?: audioState.bridgeProviders.firstOrNull { it.id == settings.speakerNodeId }
+    val localBridge = bridge.takeIf { it.route?.atlasEndpoint == settings.atlasEndpoint }
+    if (selectedProvider == null && localBridge == null) return
+
+    val phase = localBridge?.phase ?: AudioBridgePhase.Disconnected
+    val status = when (phase) {
+        AudioBridgePhase.Disconnected -> "audio.bridge.status.off"
+        AudioBridgePhase.Connecting -> "audio.bridge.status.connecting"
+        AudioBridgePhase.Connected -> "audio.bridge.status.connected"
+        AudioBridgePhase.Occupied -> "audio.bridge.status.occupied"
+        AudioBridgePhase.TakenOver -> "audio.bridge.status.taken"
+        AudioBridgePhase.OccupancyUnknown -> "audio.bridge.status.unknown"
+    }
+    val canDisconnect = localBridge != null && phase in listOf(
+        AudioBridgePhase.Connected, AudioBridgePhase.Connecting,
+        AudioBridgePhase.Occupied, AudioBridgePhase.OccupancyUnknown,
+    )
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(t("audio.bridge.title"), color = Muted, fontSize = 11.sp)
+            Text(t(status), color = if (localBridge?.connected == true) Green else Muted, fontSize = 12.sp)
+            if (audioState.bridgeMessage.isNotBlank()) {
+                Text(audioState.bridgeMessage, color = Red, fontSize = 11.sp)
+            }
+        }
+        if (selectedProvider != null && (localBridge?.connected != true || localBridge.route?.providerId != selectedProvider.id)) {
+            TextButton(onClick = onConnect, enabled = !audioState.bridgeBusy) {
+                Text(t(if (phase == AudioBridgePhase.TakenOver) "audio.bridge.takeback" else "action.connect"))
+            }
+        }
+        if (canDisconnect) {
+            TextButton(onClick = onDisconnect) { Text(t("audio.bridge.disconnect")) }
+        }
+    }
+    Spacer(Modifier.height(8.dp))
+}
+
+/**
+ * Dropdown labels for a provider's devices, with the one in use marked. Without that mark
+ * the list says what could be selected but not what the robot is recording/playing through.
+ */
+@Composable
+fun deviceOptions(devices: List<AudioDevice>, current: String?): Map<String, String> {
+    val inUse = t("audio.device.in_use")
+    return devices.associate { d ->
+        val name = d.name.ifBlank { d.id }
+        d.id to if (d.id == current) "● $name · $inUse" else name
+    }
+}
+
+/**
+ * Warn that the dropdown holds a device the robot is not using yet, so a test that just
+ * failed is not blamed on the device shown here. Apply is what makes the selection take effect.
+ */
+@Composable
+fun DevicePendingHint(devices: List<AudioDevice>, selected: String, current: String?) {
+    if (current == null || !selectionPending(selected, current, devices.size)) return
+    val inUse = devices.firstOrNull { it.id == current }?.name?.takeIf { it.isNotBlank() }
+        ?: current.ifBlank { t("audio.device.os_default") }
+    Text(t("audio.device.pending", inUse), color = Amber, fontSize = 11.sp)
 }
 
 @Composable

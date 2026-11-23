@@ -282,6 +282,13 @@ fun ChatScreen(
         )
     }
 
+    if (state.bridgeTakeoverPrompt) {
+        BridgeTakeoverDialog(
+            onConfirm = { chatViewModel.confirmBridgeTakeover() },
+            onDismiss = { chatViewModel.dismissBridgeTakeover() },
+        )
+    }
+
     // Clear-all confirmation (triggered from the sidebar)
     if (showClearConfirm) {
         AlertDialog(

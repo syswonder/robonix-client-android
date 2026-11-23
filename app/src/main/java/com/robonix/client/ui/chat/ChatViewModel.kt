@@ -17,6 +17,8 @@ import com.robonix.client.data.local.PlanHistoryCodec
 import kotlinx.coroutines.CancellationException
 import com.robonix.client.data.model.VoiceEvent
 import com.robonix.client.domain.AudioRepository
+import com.robonix.client.domain.BridgeConnectResult
+import com.robonix.client.domain.hasSameAudioRoute
 import com.robonix.client.domain.ChatRepository
 import com.robonix.client.domain.RtdlStateHolder
 import com.robonix.client.domain.createTimelineEvent
@@ -56,6 +58,8 @@ data class ChatUiState(
     val liveStatus: String? = null,
     /** Incremented on every token chunk arrival so Compose can auto-scroll accurately */
     val streamTokenCount: Long = 0L,
+    /** Set when starting voice found the bridge held by another client; prompts a takeover dialog. */
+    val bridgeTakeoverPrompt: Boolean = false,
 )
 
 data class PlanRecord(
@@ -355,6 +359,48 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    private var pendingBridgeTakeover: Pair<ClientSettings, Long>? = null
+
+    fun dismissBridgeTakeover() {
+        pendingBridgeTakeover = null
+        _uiState.update { it.copy(bridgeTakeoverPrompt = false) }
+    }
+
+    /**
+     * The user agreed to take the robot's audio bridge from another client. Voice does not
+     * start by itself: the press that triggered the prompt was already released.
+     */
+    fun confirmBridgeTakeover() {
+        val (settings, epoch) = pendingBridgeTakeover ?: return
+        dismissBridgeTakeover()
+        if (epoch != sessionEpoch || !settings.hasSameAudioRoute(_uiState.value.settings)) return
+        viewModelScope.launch {
+            val result = try {
+                audioRepository.connectBridge(
+                    atlasEndpoint = settings.atlasEndpoint,
+                    micNodeId = settings.micNodeId,
+                    speakerNodeId = settings.speakerNodeId,
+                    takeOver = true,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                BridgeConnectResult.Failed(e.message ?: l("common.unknown.error"))
+            }
+            if (epoch != sessionEpoch || !settings.hasSameAudioRoute(_uiState.value.settings)) return@launch
+            val text = when (result) {
+                is BridgeConnectResult.Connected -> l("audio.bridge.taken")
+                is BridgeConnectResult.Failed -> l("audio.bridge.failed", result.reason)
+                else -> return@launch
+            }
+            addMessage(ChatMessage(
+                id = chatRepository.generateMessageId(),
+                role = if (result is BridgeConnectResult.Failed) MessageRole.Error else MessageRole.Status,
+                text = text,
+            ))
+        }
+    }
+
     fun startVoice(steer: Boolean = false) {
         val state = _uiState.value
         com.robonix.client.AppLog.write("VOICE", "startVoice called, steer=$steer, voiceActive=${state.voiceActive}, atlasEndpoint=${state.settings.atlasEndpoint}")
@@ -384,12 +430,33 @@ class ChatViewModel @Inject constructor(
         voiceJob = viewModelScope.launch {
             var completedNormally = false
             try {
-                val bridgeUrl = audioRepository.autoConnectBridge(
+                val bridge = audioRepository.connectBridge(
                     atlasEndpoint = target,
                     micNodeId = state.settings.micNodeId,
                     speakerNodeId = state.settings.speakerNodeId,
                 )
-                com.robonix.client.AppLog.write("VOICE", "Bridge result: $bridgeUrl")
+                com.robonix.client.AppLog.write("VOICE", "Bridge result: $bridge")
+                when (bridge) {
+                    is BridgeConnectResult.Busy -> {
+                        // Another client holds the robot's audio; ask before taking it.
+                        if (epoch == sessionEpoch && state.settings.hasSameAudioRoute(_uiState.value.settings)) {
+                            pendingBridgeTakeover = state.settings to epoch
+                            _uiState.update { it.copy(bridgeTakeoverPrompt = true) }
+                        }
+                        return@launch
+                    }
+                    is BridgeConnectResult.Failed -> {
+                        if (epoch == sessionEpoch) {
+                            addMessage(ChatMessage(
+                                id = chatRepository.generateMessageId(),
+                                role = MessageRole.Error,
+                                text = l("audio.bridge.failed", bridge.reason),
+                            ))
+                        }
+                        return@launch
+                    }
+                    is BridgeConnectResult.Connected, BridgeConnectResult.NotNeeded -> Unit
+                }
                 com.robonix.client.AppLog.write("VOICE", "Calling startVoiceSession...")
 
                 chatRepository.startVoiceSession(
@@ -427,10 +494,6 @@ class ChatViewModel @Inject constructor(
                             isTaskRunning = if (wasBusy) it.isTaskRunning else false,
                         )
                     }
-                    // Release the robot's single reverse-audio slot once the turn is
-                    // over: keeping it open would fight any other robonix-client
-                    // (e.g. the desktop one) for the same slot.
-                    audioRepository.disconnectBridge()
                     // Only persist a real turn — a discarded/cancelled press
                     // (too-brief release, stop) leaves junk sessions behind.
                     if (completedNormally) persistCurrentConversation()
@@ -476,9 +539,6 @@ class ChatViewModel @Inject constructor(
         com.robonix.client.AppLog.write("VOICE", "stopVoiceSession called, voiceActive=${_uiState.value.voiceActive}")
         finishInFlight = false
         recordingConfirmed = false
-        // A session transition changes the epoch before cancellation, so the old
-        // stream's finally block deliberately cannot release this shared bridge.
-        if (voiceJob != null) audioRepository.disconnectBridge()
         voiceJob?.cancel()
         voiceJob = null
         _uiState.update { it.copy(voiceActive = false, isRecording = false) }

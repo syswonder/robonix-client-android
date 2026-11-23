@@ -33,9 +33,7 @@ Robonix 的 Android 手机客户端：和机器人对话、下发任务，查看
 | RTDL | 查看当前执行的计划和步骤 |
 | 音频 | 选择麦克风、扬声器、ASR/TTS 节点 |
 | 健康 | 硬件健康状态和 3D 部件视图 |
-| 设置 | 连接地址、语言、开发者日志等 |
-
-反馈问题时，可在「设置 → 开发者日志」中复制日志一起附上。
+| 设置 | 连接地址、语言等 |
 
 ## 从源码构建
 
@@ -51,6 +49,20 @@ Robonix 的 Android 手机客户端：和机器人对话、下发任务，查看
 ```
 
 `.proto` 文件在构建时由 protobuf 插件自动编译。首次构建要下载较多依赖，耗时会比较长。
+
+### 调试日志
+
+App 把日志写到私有缓存目录 `cache/logs/robonix.log`，超过 1 MB 时转存为 `robonix.log.1`（只留这一份旧文件）。
+部分厂商系统（如 vivo）会过滤第三方应用的 logcat，所以以这个文件为准。release 包不可调试、adb 读不到，用「设置 → 日志 → 分享日志」导出近期的连接状态、RPC 方法、状态码和耗时。debug 包可以直接用 adb 读完整日志：
+
+```bash
+adb shell run-as com.robonix.client tail -n 200 cache/logs/robonix.log
+adb exec-out run-as com.robonix.client cat cache/logs/robonix.log > robonix.log
+```
+
+每次进程启动写一行 `===== session start`（版本、机型、系统版本），下一行 `previous exit` 是系统记录的上个进程退出原因。
+常用标签：`RPC` 是所有 gRPC 调用（方法、地址、状态码、耗时，不含内容；轮询调用只记首次、状态变化、慢调用和每分钟汇总）；
+`CRASH` 是未捕获异常；`NAV` 是切页；`CONN` 是连接地址和在线状态变化；`NET` 是手机网络变化；`LIFECYCLE` 是前后台。
 
 ### Release 签名
 

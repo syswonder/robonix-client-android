@@ -12,18 +12,31 @@ import com.robonix.proto.vitalsstream.StreamVitals_Request
 import com.robonix.proto.vitalsstream.VitalsSnapshot
 import io.grpc.CallOptions
 import io.grpc.MethodDescriptor
+import io.grpc.Status
 import io.grpc.protobuf.ProtoUtils
 import io.grpc.stub.ClientCalls
 import io.grpc.stub.StreamObserver
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
+
+data class RobotVitalsModel(
+    val description: RobotDescription,
+    val assets: Map<String, ByteArray>,
+) {
+    val hasUrdf: Boolean get() = description.urdfXml.isNotBlank()
+
+    fun hasSameContent(other: RobotVitalsModel): Boolean =
+        description == other.description && assets.keys == other.assets.keys &&
+            assets.all { (path, bytes) -> bytes.contentEquals(other.assets.getValue(path)) }
+}
 
 /**
  * Soma robot description + Vitals hardware stream for the 3D health view.
@@ -68,13 +81,12 @@ class RobotVitalsRepository @Inject constructor(
             .setResponseMarshaller(ProtoUtils.marshaller(VitalsSnapshot.getDefaultInstance()))
             .build()
 
-    /** STL/DAE meshes for the current URDF, keyed by asset path (for WebView interception). */
-    private val assets = ConcurrentHashMap<String, ByteArray>()
-
-    suspend fun loadRobotDescription(atlasEndpoint: String): RobotDescription = withContext(Dispatchers.IO) {
+    suspend fun loadRobotDescription(atlasEndpoint: String): RobotVitalsModel = withContext(Dispatchers.IO) {
         val yamlEndpoint = atlasClient.discoverEndpoint(atlasEndpoint, CONTRACT_SOMA_GET_YAML)
         val yamlResponse = ClientCalls.blockingUnaryCall(
-            channelProvider.getChannel(yamlEndpoint).newCall(GET_YAML_METHOD, CallOptions.DEFAULT),
+            channelProvider.getChannel(yamlEndpoint).newCall(
+                GET_YAML_METHOD, CallOptions.DEFAULT.withDeadlineAfter(10, TimeUnit.SECONDS),
+            ),
             GetYaml_Request.getDefaultInstance(),
         )
         val yamlText = yamlResponse.yamlText
@@ -86,23 +98,26 @@ class RobotVitalsRepository @Inject constructor(
         )
 
         var urdfXml = ""
+        var assets = emptyMap<String, ByteArray>()
         try {
             val urdfEndpoint = atlasClient.discoverEndpoint(atlasEndpoint, CONTRACT_SOMA_GET_URDF)
             val urdfResponse = ClientCalls.blockingUnaryCall(
-                channelProvider.getChannel(urdfEndpoint).newCall(GET_URDF_METHOD, CallOptions.DEFAULT),
+                channelProvider.getChannel(urdfEndpoint).newCall(
+                    GET_URDF_METHOD, CallOptions.DEFAULT.withDeadlineAfter(15, TimeUnit.SECONDS),
+                ),
                 GetUrdf_Request.newBuilder().setRobotId(robotId).setIncludeAssets(true).build(),
             )
             urdfXml = urdfResponse.urdfXml
-            assets.clear()
-            urdfResponse.assetsList.forEach { asset -> assets[asset.path] = asset.data.toByteArray() }
+            assets = urdfResponse.assetsList.associate { it.path to it.data.toByteArray() }
             AppLog.write("VITALS", "urdf from $urdfEndpoint assets=${assets.size}")
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            // URDF is optional — the YAML topology still renders as a procedural placeholder.
             AppLog.write("VITALS", "GetUrdf failed; procedural fallback", e)
         }
 
-        try {
-            return@withContext RobotVitalsMapper.normalizeRobotDescription(yamlText, urdfXml, robotId, ASSET_BASE_URL)
+        val description = try {
+            RobotVitalsMapper.normalizeRobotDescription(yamlText, urdfXml, robotId, ASSET_BASE_URL)
         } catch (e: Exception) {
             // Surface the real YAML load problem: the UI sees the generic
             // "Soma YAML must contain a mapping" but the log file keeps the
@@ -110,9 +125,8 @@ class RobotVitalsRepository @Inject constructor(
             AppLog.write("VITALS", "normalizeRobotDescription failed len=${yamlText.length}", e)
             throw e
         }
+        RobotVitalsModel(description, assets)
     }
-
-    fun assetForPath(path: String): ByteArray? = assets[path]
 
     fun streamVitalsSnapshots(atlasEndpoint: String): Flow<VitalsSnapshot> = callbackFlow {
         val endpoint = atlasClient.discoverEndpoint(atlasEndpoint, CONTRACT_VITALS_STREAM)
@@ -132,7 +146,11 @@ class RobotVitalsRepository @Inject constructor(
                 }
 
                 override fun onError(t: Throwable) {
-                    AppLog.write("VITALS", "vitals stream error: ${t.message}", t)
+                    // Leaving the screen cancels the call and lands here too; the
+                    // RPC close line already records that, so skip the stack trace.
+                    if (Status.fromThrowable(t).code != Status.Code.CANCELLED) {
+                        AppLog.write("VITALS", "vitals stream error: ${t.message}", t)
+                    }
                     close(t)
                 }
 

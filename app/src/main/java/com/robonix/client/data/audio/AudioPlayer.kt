@@ -117,10 +117,10 @@ class AudioPlayer @Inject constructor() {
     private val streamLock = Any()
     private var streamTrack: AudioTrack? = null
 
-    /** Open the streaming track; no-op when one is already open. */
-    fun beginStream() {
+    /** Open the streaming track; no-op when one is already open. False when the device refuses to open one. */
+    fun beginStream(): Boolean {
         synchronized(streamLock) {
-            if (streamTrack != null) return
+            if (streamTrack != null) return true
             val minBuffer = AudioTrack.getMinBufferSize(sampleRate, channelConfig, audioFormat)
             val track = AudioTrack.Builder()
                 .setAudioAttributes(
@@ -142,10 +142,11 @@ class AudioPlayer @Inject constructor() {
 
             if (track.state != AudioTrack.STATE_INITIALIZED) {
                 track.release()
-                return
+                return false
             }
             track.play()
             streamTrack = track
+            return true
         }
     }
 

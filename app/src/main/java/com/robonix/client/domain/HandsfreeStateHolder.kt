@@ -69,16 +69,20 @@ class HandsfreeStateHolder @Inject constructor(
         pollJob = null
     }
 
-    suspend fun refreshOnce(target: String) {
-        if (target.isBlank()) return
-        try {
+    suspend fun refreshOnce(target: String): HandsfreeStatus? {
+        if (target.isBlank()) return null
+        return try {
             val s = chatRepository.getHandsfreeStatus(target)
             _status.value = s
             _error.value = null
             syncWatcher(target)
+            s
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             _error.value = e.message ?: "handsfree unavailable"
             AppLog.write("HANDSFREE", "status refresh failed: ${e.message}")
+            null
         }
     }
 

@@ -6,6 +6,7 @@ import com.robonix.client.AppLog
 import com.robonix.client.data.grpc.GrpcChannelProvider
 import com.robonix.client.data.model.ClientSettings
 import com.robonix.client.data.model.SystemSnapshot
+import com.robonix.client.domain.AudioRepository
 import com.robonix.client.domain.SettingsRepository
 import com.robonix.client.domain.SystemRepository
 import com.robonix.client.ui.i18n.AppStrings
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -33,6 +35,7 @@ class SharedViewModel @Inject constructor(
     private val systemRepository: SystemRepository,
     private val rtdlState: com.robonix.client.domain.RtdlStateHolder,
     private val channelProvider: GrpcChannelProvider,
+    private val audioRepository: AudioRepository,
 ) : ViewModel() {
 
     private val _settings = MutableStateFlow(ClientSettings())
@@ -49,6 +52,13 @@ class SharedViewModel @Inject constructor(
 
     private val _unreadRtdlCount = MutableStateFlow(0)
     val unreadRtdlCount: StateFlow<Int> = _unreadRtdlCount.asStateFlow()
+
+    private companion object {
+        // Each screen holds its own SharedViewModel instance, so connection
+        // changes are logged against process-wide values to appear once.
+        @Volatile var loggedEndpoint: String? = null
+        @Volatile var loggedOnline: Boolean? = null
+    }
 
     /** Currently visible tab route ("chat" / "rtdl" / "audio" / "settings"). */
     private val _currentRoute = MutableStateFlow("chat")
@@ -68,7 +78,15 @@ class SharedViewModel @Inject constructor(
                 // changes mid-session; otherwise stale keep-alive channels to
                 // the old host linger and streams from it would be used.
                 if (endpointChanged) {
-                    if (lastChannelEndpoint != null) channelProvider.shutdown()
+                    if (endpoint != loggedEndpoint) {
+                        AppLog.write("CONN", "atlas endpoint ${loggedEndpoint ?: "(none)"} -> ${endpoint.ifBlank { "(blank)" }}")
+                        loggedEndpoint = endpoint
+                    }
+                    if (lastChannelEndpoint != null) {
+                        channelProvider.shutdown()
+                        // The audio slot belongs to the old robot; keeping it would leave that robot able to open this phone's mic.
+                        audioRepository.disconnectBridge()
+                    }
                     lastChannelEndpoint = endpoint
                 }
                 _settings.value = s
@@ -104,6 +122,19 @@ class SharedViewModel @Inject constructor(
             }
         }
 
+        // Online/offline transitions, not every heartbeat.
+        viewModelScope.launch {
+            _connectionState.drop(1).collect { s ->
+                if (s.isConnecting || s.isOnline == loggedOnline) return@collect
+                loggedOnline = s.isOnline
+                AppLog.recordConnectionDiagnostic(s.isOnline)
+                AppLog.write(
+                    "CONN",
+                    if (s.isOnline) "online state=${s.statusLabel}" else "offline error=${s.lastError}",
+                )
+            }
+        }
+
         // A new plan round arrived while the user is not on the RTDL tab → badge.
         viewModelScope.launch {
             var first = true
@@ -115,6 +146,7 @@ class SharedViewModel @Inject constructor(
     }
 
     fun onTabSelected(route: String) {
+        if (route != _currentRoute.value) AppLog.write("NAV", "${_currentRoute.value} -> $route")
         _currentRoute.value = route
         if (route == "rtdl") resetRtdlCount()
     }
@@ -123,12 +155,16 @@ class SharedViewModel @Inject constructor(
         _settings.update(update)
     }
 
-    fun saveSettings() {
+    fun saveSettings() = saveSettings(_settings.value)
+
+    fun saveSettings(settings: ClientSettings) {
         viewModelScope.launch {
             try {
-                settingsRepository.saveSettings(_settings.value)
+                AppLog.write("SETTINGS", "save ${settings.toLogString()}")
+                settingsRepository.saveSettings(settings)
                 _events.emit(AppEvent.Snackbar(AppStrings.format(_settings.value.language, "msg.settings.saved")))
             } catch (e: Exception) {
+                AppLog.write("SETTINGS", "save failed", e)
                 _events.emit(AppEvent.Snackbar(AppStrings.format(_settings.value.language, "msg.settings.save.failed", e.message ?: "")))
             }
         }
@@ -184,6 +220,13 @@ class SharedViewModel @Inject constructor(
     }
 
 }
+
+/** Every field except free-text ids (user/session), which are logged only as set/blank. */
+private fun ClientSettings.toLogString(): String =
+    "host=$robotHost atlasPort=$atlasPort liaison=${liaisonEndpoint.ifBlank { "(auto)" }} " +
+        "user=${if (userId.isBlank()) "blank" else "set"} session=${if (sessionId.isBlank()) "blank" else "set"} " +
+        "lang=$language record=${recordSeconds}s mic=$micNodeId/$micDeviceId speaker=$speakerNodeId/$speakerDeviceId " +
+        "tts=$ttsNodeId asr=$asrNodeId voiceprint=$voiceprintNodeId"
 
 sealed class AppEvent {
     data class Snackbar(val message: String) : AppEvent()

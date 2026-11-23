@@ -37,6 +37,7 @@ import com.robonix.client.data.model.RobotComponent
 import com.robonix.client.data.model.RobotDescription
 import com.robonix.client.data.local.AlertHistoryStore
 import com.robonix.client.domain.RobotVitalsMapper
+import com.robonix.client.domain.RobotVitalsModel
 import com.robonix.client.domain.RobotVitalsRepository
 import com.robonix.client.domain.SystemRepository
 import com.robonix.client.domain.VitalsRepository
@@ -113,7 +114,7 @@ private fun moduleHealthKey(modules: List<ModuleHealth>): String =
     modules.joinToString("|") { "${it.moduleKey}=${it.health}:${it.state}" }
 
 data class VitalsUiState(
-    val description: RobotDescription? = null,
+    val model: RobotVitalsModel? = null,
     val hardware: HardwareSnapshot? = null,
     val modules: List<ModuleHealth> = emptyList(),
     val providers: List<ProviderInfo> = emptyList(),
@@ -123,7 +124,9 @@ data class VitalsUiState(
     val moduleError: String? = null,
     val selected: ModuleHealth? = null,
     val alerts: List<AlertEvent> = emptyList(),
-)
+) {
+    val description: RobotDescription? get() = model?.description
+}
 
 private data class TreeNode(
     val component: RobotComponent,
@@ -144,6 +147,9 @@ class VitalsViewModel @Inject constructor(
 
     private var streamJob: Job? = null
     private var pollJob: Job? = null
+    private var descriptionJob: Job? = null
+    private var descriptionNeedsRetry = false
+    private var robotEndpoint: String? = null
     private var lastSnapshot: VitalsSnapshot? = null
 
     // Health is gated separately from the live analog values so the strobe never
@@ -191,9 +197,12 @@ class VitalsViewModel @Inject constructor(
     }
 
     fun start(target: String) {
+        stop()
+        if (robotEndpoint != target) {
+            _uiState.update { VitalsUiState(alerts = it.alerts) }
+            robotEndpoint = target
+        }
         if (target.isBlank()) return
-        streamJob?.cancel()
-        pollJob?.cancel()
         lastSnapshot = null
         healthGate.reset()
         moduleHealthGate.reset()
@@ -206,9 +215,15 @@ class VitalsViewModel @Inject constructor(
 
         streamJob = viewModelScope.launch {
             var retry = 1_000L
+            var reconnecting = false
             while (isActive) {
                 try {
                     robotVitalsRepository.streamVitalsSnapshots(target).collect { snapshot ->
+                        if (reconnecting) {
+                            loadDescription(target)
+                            reconnecting = false
+                        }
+                        retry = 1_000L
                         lastSnapshot = snapshot
                         _uiState.update { it.copy(hardwareError = null, loaded = true) }
                         // "-1" is the source's no-data sentinel: such a frame
@@ -236,9 +251,10 @@ class VitalsViewModel @Inject constructor(
                     throw e
                 } catch (e: Exception) {
                     _uiState.update { it.copy(hardwareError = e.message) }
-                    delay(retry)
-                    retry = (retry * 2).coerceAtMost(15_000L)
                 }
+                reconnecting = true
+                delay(retry)
+                retry = (retry * 2).coerceAtMost(15_000L)
             }
         }
 
@@ -251,7 +267,9 @@ class VitalsViewModel @Inject constructor(
                 // Providers come from the Atlas system snapshot (heartbeat-based);
                 // refresh them less often than the module rows.
                 if (tick % 2 == 0) loadProviders(target)
-                if (tick % 10 == 0) loadDescription(target)
+                if (tick % 10 == 0 && descriptionNeedsRetry && descriptionJob?.isActive != true) {
+                    loadDescription(target)
+                }
             }
         }
     }
@@ -259,15 +277,21 @@ class VitalsViewModel @Inject constructor(
     fun stop() {
         streamJob?.cancel(); streamJob = null
         pollJob?.cancel(); pollJob = null
+        descriptionJob?.cancel()
+        descriptionJob = null
     }
 
-    fun assetForPath(path: String): ByteArray? = robotVitalsRepository.assetForPath(path)
-
     private fun loadDescription(target: String) {
-        viewModelScope.launch {
+        descriptionJob?.cancel()
+        descriptionJob = viewModelScope.launch {
             try {
-                val description = robotVitalsRepository.loadRobotDescription(target)
-                val previous = _uiState.value.description
+                val fetched = robotVitalsRepository.loadRobotDescription(target)
+                descriptionNeedsRetry = !fetched.hasUrdf
+                val current = _uiState.value.model
+                if (current?.hasUrdf == true && !fetched.hasUrdf) return@launch
+                val model = current?.takeIf { it.hasSameContent(fetched) } ?: fetched
+                val description = model.description
+                val previous = current?.description
                 // The description only changes shape very rarely; the periodic
                 // refresh must not re-publish a raw snapshot, which would bypass
                 // the health gate and flash a fault onto the screen.
@@ -281,13 +305,16 @@ class VitalsViewModel @Inject constructor(
                 }
                 _uiState.update { state ->
                     state.copy(
-                        description = description,
+                        model = model,
                         hardware = remapped ?: state.hardware,
                         descriptionError = null,
                         loaded = true,
                     )
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
+                descriptionNeedsRetry = true
                 _uiState.update { it.copy(descriptionError = e.message, loaded = true) }
             }
         }
@@ -402,16 +429,19 @@ fun VitalsScreen(
         }
 
         if (isViewerExpanded) {
-            UrdfViewer(
-                description = description,
-                highlights = highlights,
-                assetProvider = viewModel::assetForPath,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(260.dp)
-                    .padding(horizontal = 8.dp, vertical = 2.dp)
-                    .clip(RoundedCornerShape(8.dp)),
-            )
+            val model = state.model
+            key(model) {
+                UrdfViewer(
+                    description = description,
+                    highlights = highlights,
+                    assetProvider = { path -> model?.assets?.get(path) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(260.dp)
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                        .clip(RoundedCornerShape(8.dp)),
+                )
+            }
         }
 
         VitalsBody(

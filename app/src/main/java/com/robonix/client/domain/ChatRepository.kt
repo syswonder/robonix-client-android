@@ -31,20 +31,29 @@ class ChatRepository @Inject constructor(
      * {atlas_host}:50081 when discovery fails (matching the web client's
      * resolve_liaison behaviour).
      */
+    private val resolvedLiaison = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     private suspend fun resolveLiaisonEndpoint(
         atlasEndpoint: String,
         contractId: String = CONTRACT_LIAISON_SUBMIT,
     ): String {
-        com.robonix.client.AppLog.write("GPRC", "resolveLiaison: atlas=$atlasEndpoint contract=$contractId")
+        // Handsfree polls this every 3 s, so log only when the outcome changes.
+        val key = "$atlasEndpoint $contractId"
         return try {
             val ep = atlasClient.discoverEndpoint(atlasEndpoint, contractId)
-            com.robonix.client.AppLog.write("GPRC", "resolveLiaison: discovered $ep")
+            if (resolvedLiaison.put(key, ep) != ep) {
+                com.robonix.client.AppLog.write("LIAISON", "resolve atlas=$atlasEndpoint contract=$contractId -> $ep")
+            }
             ep
         } catch (e: Exception) {
             val host = atlasEndpoint.substringBeforeLast(":")
             val fallback = if (host.isNotBlank()) "$host:$DEFAULT_LIAISON_PORT"
             else throw RuntimeException("Cannot resolve Liaison endpoint from $atlasEndpoint")
-            com.robonix.client.AppLog.write("GPRC", "resolveLiaison: discovery failed, fallback=$fallback", e)
+            if (resolvedLiaison.put(key, "fallback $fallback") != "fallback $fallback") {
+                com.robonix.client.AppLog.write(
+                    "LIAISON", "resolve atlas=$atlasEndpoint contract=$contractId failed, fallback=$fallback", e,
+                )
+            }
             fallback
         }
     }

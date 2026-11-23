@@ -39,6 +39,10 @@ fun UrdfViewer(
     val highlightsJson = remember(highlights) { highlightsToJson(highlights) }
 
     AndroidView(
+        onRelease = { webView ->
+            state.webView = null
+            webView.destroy()
+        },
         factory = { ctx ->
             WebView(ctx).apply {
                 state.webView = this

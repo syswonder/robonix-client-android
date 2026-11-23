@@ -10,12 +10,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.AltRoute
 import androidx.compose.material.icons.automirrored.filled.CallSplit
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.CheckCircleOutline
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.FormatListNumbered
-import androidx.compose.material.icons.filled.Lens
-import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -33,6 +28,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.robonix.client.ui.components.PulsingStatusDot
+import com.robonix.client.ui.i18n.t
 import com.robonix.client.ui.theme.*
 
 @Composable
@@ -43,12 +39,11 @@ fun CapsuleNodeView(
     modifier: Modifier = Modifier,
 ) {
     val node = layoutNode.node
-    val status = layoutNode.status.uppercase()
-    val leafSuccess = layoutNode.stateObj?.leafResult?.success
-    val isRunning = status in listOf("RUNNING", "ACTIVE", "VERIFYING")
-    val isFailed = status in listOf("FAILED", "ERROR", "TIMEOUT", "CANCELED", "CANCELLED", "ABORTED") ||
-        (leafSuccess == false)
-    val isSucceeded = !isFailed && (status in listOf("SUCCEEDED", "SUCCESS") || leafSuccess == true)
+    val status = layoutNode.displayStatus
+    val isSkipped = status == RtdlDisplayStatus.Skipped
+    val isRunning = status == RtdlDisplayStatus.Running
+    val isFailed = status == RtdlDisplayStatus.Failed
+    val isSucceeded = status == RtdlDisplayStatus.Succeeded
 
     // Breathing glow animation for running nodes
     val infiniteTransition = rememberInfiniteTransition(label = "nodeGlow")
@@ -83,17 +78,29 @@ fun CapsuleNodeView(
     val nodeIcon: ImageVector = when (node.kind.lowercase()) {
         "sequence" -> Icons.Default.FormatListNumbered
         "parallel" -> Icons.AutoMirrored.Filled.CallSplit
+        "if" -> Icons.AutoMirrored.Filled.AltRoute
+        "repeat" -> Icons.Default.Refresh
+        "while" -> Icons.Default.Sync
         "fallback", "selector" -> Icons.AutoMirrored.Filled.AltRoute
         "condition" -> Icons.Default.CheckCircleOutline
-        "action" -> Icons.Default.PlayArrow
+        "action", "do" -> Icons.Default.PlayArrow
         else -> Icons.Default.Lens
     }
 
+    val isControlNode = node.kind.lowercase() in listOf("sequence", "parallel", "if", "repeat", "while", "fallback", "selector")
+
     // Single concise, human-readable title without repetitive noise
     val label = when {
-        node.call != null -> node.call.name.substringAfterLast("/")
-        node.description.isNotBlank() && !node.description.contains("-") && node.description.length <= 18 ->
+        node.call != null ->
+            node.call.name.substringAfterLast("/")
+        node.description.isNotBlank() && !node.description.startsWith("-") && node.description.length <= 18 ->
             node.description
+        node.kind.lowercase() == "repeat" ->
+            if (node.repeatCount > 0) "Repeat ×${node.repeatCount}" else "Repeat"
+        node.kind.lowercase() == "while" ->
+            if (node.maxIterations > 0) "While (≤${node.maxIterations})" else "While"
+        node.kind.lowercase() == "if" ->
+            "If"
         node.kind.isNotBlank() && node.kind.lowercase() in listOf("sequence", "parallel", "selector", "fallback", "condition") ->
             node.kind.replaceFirstChar { it.uppercase() }
         node.opId.isNotBlank() && !node.opId.contains("-") ->
@@ -102,17 +109,21 @@ fun CapsuleNodeView(
     }
 
     val cardBg = when {
+        isSkipped -> Panel2.copy(alpha = 0.45f)
         isSucceeded -> Color(0xFF0D221D)
         isFailed -> Color(0xFF281215)
         isRunning -> Color(0xFF281F0D)
+        isControlNode -> Panel2.copy(alpha = 0.85f)
         else -> Panel2
     }
 
     val themeColor = when {
+        isSkipped -> Dim
         isRunning -> Amber
         isSucceeded -> Green
         isFailed -> Red
-        else -> Cyan
+        isControlNode -> Cyan
+        else -> Text
     }
 
     val shape = RoundedCornerShape(14.dp)
@@ -138,26 +149,27 @@ fun CapsuleNodeView(
                     width = if (isSelected) 2.dp else if (isRunning) 1.5.dp else 1.dp,
                     color = when {
                         isSelected -> Cyan
+                        isSkipped -> LineSoft.copy(alpha = 0.35f)
                         isRunning -> Amber.copy(alpha = glowAlpha)
                         isSucceeded -> Green.copy(alpha = 0.65f)
                         isFailed -> Red.copy(alpha = 0.75f)
+                        isControlNode -> Cyan.copy(alpha = 0.35f)
                         else -> LineSoft
                     },
                 ),
                 shape = shape,
             )
             .clickable { onClick() }
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 10.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center,
     ) {
         Row(
             modifier = Modifier.fillMaxSize(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             // Left: Node Icon inside a soft squircle container
             Surface(
-                color = themeColor.copy(alpha = 0.15f),
+                color = themeColor.copy(alpha = if (isControlNode) 0.12f else 0.16f),
                 shape = RoundedCornerShape(8.dp),
                 modifier = Modifier.size(32.dp),
             ) {
@@ -171,9 +183,9 @@ fun CapsuleNodeView(
                 }
             }
 
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(8.dp))
 
-            // Center: Clean, unclipped single-line title (#index + action/kind name)
+            // Center: Clean, unclipped single-line title (#index + tag + action/kind name)
             Row(
                 modifier = Modifier.weight(1f),
                 verticalAlignment = Alignment.CenterVertically,
@@ -185,22 +197,58 @@ fun CapsuleNodeView(
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                 )
+
+                if (node.kind.lowercase() == "if") {
+                    Spacer(Modifier.width(4.dp))
+                    Surface(
+                        color = NeonPurple.copy(alpha = 0.18f),
+                        shape = RoundedCornerShape(4.dp),
+                    ) {
+                        Text(
+                            text = "IF",
+                            color = NeonPurple,
+                            fontSize = 9.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                        )
+                    }
+                } else if (node.kind.lowercase() in listOf("repeat", "while")) {
+                    Spacer(Modifier.width(4.dp))
+                    val tagText = if (node.repeatCount > 0) "×${node.repeatCount}" else if (node.maxIterations > 0) "≤${node.maxIterations}" else "LOOP"
+                    Surface(
+                        color = Amber.copy(alpha = 0.18f),
+                        shape = RoundedCornerShape(4.dp),
+                    ) {
+                        Text(
+                            text = tagText,
+                            color = Amber,
+                            fontSize = 9.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                        )
+                    }
+                }
+
                 Spacer(Modifier.width(6.dp))
+
                 Text(
                     text = label,
-                    color = Text,
-                    fontSize = 13.5.sp,
+                    color = if (isSkipped) Dim else Text,
+                    fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
 
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(6.dp))
 
             // Right: Glanceable status badge with icon & text
             Surface(
                 color = when {
+                    isSkipped -> LineSoft.copy(alpha = 0.25f)
                     isRunning -> Amber.copy(alpha = 0.16f)
                     isSucceeded -> Green.copy(alpha = 0.14f)
                     isFailed -> Red.copy(alpha = 0.16f)
@@ -210,6 +258,7 @@ fun CapsuleNodeView(
                 border = BorderStroke(
                     width = 0.8.dp,
                     color = when {
+                        isSkipped -> LineSoft.copy(alpha = 0.35f)
                         isRunning -> Amber.copy(alpha = 0.45f)
                         isSucceeded -> Green.copy(alpha = 0.4f)
                         isFailed -> Red.copy(alpha = 0.45f)
@@ -222,11 +271,19 @@ fun CapsuleNodeView(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     when {
+                        isSkipped -> {
+                            Text(
+                                text = t(status.label),
+                                color = Dim,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
                         isRunning -> {
                             PulsingStatusDot(color = Amber, size = 5.dp)
                             Spacer(Modifier.width(4.dp))
                             Text(
-                                text = "运行中",
+                                text = t(status.label),
                                 color = Amber,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
@@ -241,7 +298,7 @@ fun CapsuleNodeView(
                             )
                             Spacer(Modifier.width(3.dp))
                             Text(
-                                text = "成功",
+                                text = t(status.label),
                                 color = Green,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
@@ -256,7 +313,7 @@ fun CapsuleNodeView(
                             )
                             Spacer(Modifier.width(3.dp))
                             Text(
-                                text = "失败",
+                                text = t(status.label),
                                 color = Red,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
@@ -264,7 +321,7 @@ fun CapsuleNodeView(
                         }
                         else -> {
                             Text(
-                                text = "等待",
+                                text = t(status.label),
                                 color = Dim,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Medium,

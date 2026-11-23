@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import com.robonix.client.AppLog
 import io.grpc.ManagedChannel
 import io.grpc.okhttp.OkHttpChannelBuilder
 import kotlinx.coroutines.channels.awaitClose
@@ -36,6 +37,7 @@ class GrpcChannelProvider @Inject constructor(
     private val context: Context,
 ) {
     private val channels = ConcurrentHashMap<String, ManagedChannel>()
+    private val rpcLogPolicy = RpcLogPolicy()
 
     fun getChannel(target: String): ManagedChannel {
         val key = target.trim()
@@ -48,13 +50,16 @@ class GrpcChannelProvider @Inject constructor(
         }!!
     }
 
-    private fun buildChannel(target: String): ManagedChannel =
-        OkHttpChannelBuilder.forTarget(target)
+    private fun buildChannel(target: String): ManagedChannel {
+        AppLog.write("RPC", "channel build $target")
+        return OkHttpChannelBuilder.forTarget(target)
             .usePlaintext()
             .keepAliveTime(30, TimeUnit.SECONDS)
             .keepAliveTimeout(10, TimeUnit.SECONDS)
             .keepAliveWithoutCalls(true)
+            .intercept(RpcCallLogger(target, rpcLogPolicy))
             .build()
+    }
 
     /**
      * Shut down every cached channel. Called when the robot host changes so
@@ -64,6 +69,7 @@ class GrpcChannelProvider @Inject constructor(
     fun shutdown() {
         val closing = channels.values.toList()
         channels.clear()
+        AppLog.write("RPC", "channel shutdown all (${closing.size})")
         closing.forEach { it.shutdown() }
     }
 

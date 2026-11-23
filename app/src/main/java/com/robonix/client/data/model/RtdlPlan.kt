@@ -16,6 +16,10 @@ data class RtdlNode(
     val opId: String = "",
     val description: String = "",
     val call: CapabilityCall? = null,
+    val conditionJson: String = "",
+    val bind: String = "",
+    val repeatCount: Int = 0,
+    val maxIterations: Int = 0,
 )
 
 data class CapabilityCall(
@@ -33,6 +37,8 @@ data class RtdlNodeState(
     val planId: String = "",
     val opId: String = "",
     val description: String = "",
+    val operatorDetail: String = "",
+    val nodeKind: Int = 0,
 )
 
 data class CapabilityCallResult(

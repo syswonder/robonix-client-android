@@ -8,9 +8,10 @@ import org.junit.Test
 class PlanHistoryCodecTest {
     private val plan = RtdlPlan("p", "s", 2, 0, listOf(RtdlNode(0, 1, "call", listOf(1),
         "op", "description", CapabilityCall("c", "provider", "contract", "move",
-            mapOf("nested" to mapOf("items" to listOf(1, true, null)), "text" to "ok")))))
+            mapOf("nested" to mapOf("items" to listOf(1, true, null)), "text" to "ok")),
+        conditionJson = "{\"op\":\"eq\"}", bind = "pos", repeatCount = 3, maxIterations = 5)))
     private val node = RtdlNodeState(0, "SUCCEEDED", CapabilityCallResult("c", "provider", "contract",
-        "move", true, "output text", ""), "p", "op", "description")
+        "move", true, "output text", ""), "p", "op", "description", "executed 3 times", 4)
     private val batch = BatchResult("p", "s", 2, false, listOf(node))
 
     @Test fun nestedArgumentsAndResultRoundTrip() {

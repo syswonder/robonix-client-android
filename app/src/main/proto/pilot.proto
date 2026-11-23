@@ -28,6 +28,10 @@ message RtdlNode {
   CapabilityCall call = 3;
   string op_id = 4;
   string description = 5;
+  string condition_json = 6;
+  string bind = 7;
+  uint32 repeat_count = 8;
+  uint32 max_iterations = 9;
 }
 
 message Plan {
@@ -39,6 +43,17 @@ message Plan {
 }
 
 message RtdlNodeState {
+  enum RtdlNodeStateEnum {
+    PENDING = 0;
+    RUNNING = 1;
+    SUCCEEDED = 2;
+    FAILED = 3;
+    CANCELED = 4;
+    TIMEOUT = 5;
+    PAUSED = 6;
+    VERIFYING = 7;
+  }
+
   string plan_id = 1;
   uint32 node_index = 2;
   uint32 node_kind = 3;

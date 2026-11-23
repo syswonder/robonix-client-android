@@ -29,7 +29,6 @@ import com.robonix.client.ui.components.CodeBlockView
 import com.robonix.client.ui.components.CyberCard
 import com.robonix.client.ui.components.PulsingStatusDot
 import com.robonix.client.ui.i18n.t
-import com.robonix.client.ui.i18n.tStatus
 import com.robonix.client.ui.theme.*
 import org.json.JSONObject
 
@@ -44,29 +43,30 @@ fun RtdlNodeDetailSheet(
     if (layoutNode == null) return
 
     val node = layoutNode.node
-    val status = layoutNode.status.uppercase()
-    val isRunning = status in listOf("RUNNING", "ACTIVE", "VERIFYING")
-    val isSucceeded = status in listOf("SUCCEEDED", "SUCCESS")
-    val isFailed = status in listOf("FAILED", "ERROR", "TIMEOUT")
-
-    val statusColor = when {
-        isRunning -> Amber
-        isSucceeded -> Green
-        isFailed -> Red
-        else -> Dim
+    val status = layoutNode.displayStatus
+    val isRunning = status == RtdlDisplayStatus.Running
+    val statusColor = when (status) {
+        RtdlDisplayStatus.Running -> Amber
+        RtdlDisplayStatus.Succeeded -> Green
+        RtdlDisplayStatus.Failed -> Red
+        RtdlDisplayStatus.Skipped, RtdlDisplayStatus.Pending -> Dim
     }
 
     val nodeIcon: ImageVector = when (node.kind.lowercase()) {
-        "action" -> Icons.Default.PlayArrow
-        "sequence" -> Icons.AutoMirrored.Filled.AltRoute
-        "fallback", "selector" -> Icons.AutoMirrored.Filled.CallSplit
+        "sequence" -> Icons.Default.FormatListNumbered
+        "parallel" -> Icons.AutoMirrored.Filled.CallSplit
+        "if" -> Icons.AutoMirrored.Filled.AltRoute
+        "repeat" -> Icons.Default.Refresh
+        "while" -> Icons.Default.Sync
+        "fallback", "selector" -> Icons.AutoMirrored.Filled.AltRoute
         "condition" -> Icons.Default.CheckCircleOutline
+        "action", "do" -> Icons.Default.PlayArrow
         else -> Icons.Default.Lens
     }
 
     val actionName = when {
         node.call != null -> node.call.name.substringAfterLast("/")
-        node.kind.isNotBlank() && node.kind.lowercase() in listOf("sequence", "parallel", "selector", "fallback", "condition") ->
+        node.kind.isNotBlank() && node.kind.lowercase() in listOf("sequence", "parallel", "selector", "fallback", "condition", "if", "repeat", "while", "do") ->
             node.kind.replaceFirstChar { it.uppercase() }
         node.description.isNotBlank() && !node.description.contains("-") && node.description.length <= 20 ->
             node.description
@@ -158,7 +158,7 @@ fun RtdlNodeDetailSheet(
                             Spacer(Modifier.width(4.dp))
                         }
                         Text(
-                            text = tStatus(status),
+                            text = t(status.label),
                             color = statusColor,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
@@ -246,10 +246,15 @@ fun RtdlNodeDetailSheet(
                                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 ) {
-                                    layoutNode.childrenIndices.forEach { cIdx ->
+                                    layoutNode.childrenIndices.forEachIndexed { i, cIdx ->
                                         val child = allNodesByIndex[cIdx]
+                                        val roleSuffix = when (node.kind.lowercase()) {
+                                            "if" -> if (i == 0) " (then)" else " (else)"
+                                            "repeat", "while" -> " (body)"
+                                            else -> ""
+                                        }
                                         NavPill(
-                                            label = "#$cIdx ${child?.node?.call?.name ?: child?.node?.kind ?: ""}",
+                                            label = "#$cIdx ${child?.node?.call?.name ?: child?.node?.kind ?: ""}$roleSuffix",
                                             onClick = { onSelectNode(cIdx) },
                                         )
                                     }
@@ -258,6 +263,84 @@ fun RtdlNodeDetailSheet(
                         }
                     }
                 }
+                Spacer(Modifier.height(14.dp))
+            }
+
+            // Control Parameters: Condition, Bindings, Loop Limits
+            if (node.bind.isNotBlank() || node.repeatCount > 0 || node.maxIterations > 0 || node.conditionJson.isNotBlank()) {
+                Surface(
+                    color = Panel2,
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(0.8.dp, Amber.copy(alpha = 0.35f)),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(10.dp)) {
+                        Text(
+                            text = t("rtdl.control.title"),
+                            color = Amber,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Spacer(Modifier.height(6.dp))
+
+                        if (node.bind.isNotBlank()) {
+                            Text(
+                                text = t("rtdl.control.bind", node.bind),
+                                color = Text,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                        }
+
+                        if (node.repeatCount > 0) {
+                            Text(
+                                text = t("rtdl.control.repeat", node.repeatCount),
+                                color = Text,
+                                fontSize = 11.sp,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                        }
+
+                        if (node.maxIterations > 0) {
+                            Text(
+                                text = t("rtdl.control.max_iterations", node.maxIterations),
+                                color = Text,
+                                fontSize = 11.sp,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                        }
+
+                        if (node.conditionJson.isNotBlank()) {
+                            Text(
+                                text = t("rtdl.control.condition"),
+                                color = Text,
+                                fontSize = 11.sp,
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            val formattedCond = try {
+                                JSONObject(node.conditionJson).toString(2)
+                            } catch (_: Exception) {
+                                node.conditionJson
+                            }
+                            CodeBlockView(code = formattedCond, language = "JSON")
+                        }
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+            }
+
+            // Control Node Execution Detail (operatorDetail)
+            val opDetail = layoutNode.stateObj?.operatorDetail
+            if (!opDetail.isNullOrBlank()) {
+                Text(
+                    text = t("rtdl.control.operator_detail"),
+                    color = Cyan,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(4.dp))
+                CodeBlockView(code = opDetail, language = "LOG")
                 Spacer(Modifier.height(14.dp))
             }
 
@@ -270,10 +353,11 @@ fun RtdlNodeDetailSheet(
                     fontWeight = FontWeight.Bold,
                 )
                 Spacer(Modifier.height(4.dp))
+                val truncatedArgs = t("rtdl.truncated.args")
                 val argsJson = try {
                     val rawStr = node.call.args.toString()
                     if (rawStr.length > 20000) {
-                        rawStr.take(8000) + "\n\n/* ... [超大参数已截断] ... */"
+                        rawStr.take(8000) + "\n\n/* ... $truncatedArgs ... */"
                     } else {
                         JSONObject(node.call.args).toString(2)
                     }
@@ -296,15 +380,16 @@ fun RtdlNodeDetailSheet(
                 Spacer(Modifier.height(4.dp))
 
                 if (result.output.isNotBlank()) {
+                    val truncatedOutput = t("rtdl.truncated.output", result.output.length / 1024)
                     val formattedOutput = try {
                         if (result.output.length > 20000) {
-                            result.output.take(8000) + "\n\n/* ... [超大输出已截断显示，总计 ${result.output.length / 1024} KB] ... */"
+                            result.output.take(8000) + "\n\n/* ... $truncatedOutput ... */"
                         } else {
                             JSONObject(result.output).toString(2)
                         }
                     } catch (_: Exception) {
                         if (result.output.length > 20000) {
-                            result.output.take(8000) + "\n\n/* ... [超大输出已截断显示，总计 ${result.output.length / 1024} KB] ... */"
+                            result.output.take(8000) + "\n\n/* ... $truncatedOutput ... */"
                         } else {
                             result.output
                         }

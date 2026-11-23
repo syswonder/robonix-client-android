@@ -8,6 +8,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TreeLayoutEngineTest {
+    @Test
+    fun skippedNodeDisplayTakesPrecedenceOverExecutionStatus() {
+        val node = RtdlNode(index = 0, kindId = 2, kind = "do", children = emptyList())
+        val layout = TreeLayoutEngine.computeLayout(
+            RtdlPlan("p0", "s0", 1, 0, listOf(node)),
+            mapOf(0 to RtdlNodeState(nodeIndex = 0, state = "RUNNING")),
+        ).nodes.single()
+
+        assertEquals(RtdlDisplayStatus.Running, layout.displayStatus)
+        assertEquals(RtdlDisplayStatus.Skipped, layout.copy(isSkipped = true).displayStatus)
+    }
+
 
     @Test
     fun testEmptyPlanReturnsEmptyResult() {
@@ -122,5 +134,87 @@ class TreeLayoutEngineTest {
         assertTrue("node1 should be to the left of node2", node1.x < node2.x)
         assertEquals(node1.y, node2.y, 0.01f)
         assertEquals((node1.x + node2.x) / 2f, node0.x, 0.01f)
+    }
+
+    @Test
+    fun testIfBranchingLayoutAndSkippedDetection() {
+        // If layout:
+        //       Node 0 (if)
+        //       /         \
+        //  Node 1 (then)  Node 2 (else)
+        val n0 = RtdlNode(index = 0, kindId = 3, kind = "if", children = listOf(1, 2), description = "Check Distance", conditionJson = "{\"op\":\"gt\"}")
+        val n1 = RtdlNode(index = 1, kindId = 2, kind = "do", children = emptyList(), call = CapabilityCall("c1", "chassis", "move", "forward"))
+        val n2 = RtdlNode(index = 2, kindId = 2, kind = "do", children = emptyList(), call = CapabilityCall("c2", "chassis", "stop", "halt"))
+        val plan = RtdlPlan("p_if", "s_if", 1, 0, listOf(n0, n1, n2))
+
+        // Node 1 (then) SUCCEEDED, Node 2 (else) was skipped (PENDING)
+        val nodeStates = mapOf(
+            1 to RtdlNodeState(1, "SUCCEEDED"),
+        )
+
+        val result = TreeLayoutEngine.computeLayout(plan, nodeStates)
+
+        assertEquals(3, result.nodes.size)
+        assertEquals(2, result.edges.size)
+
+        val node0 = result.nodes.find { it.node.index == 0 }!!
+        val node1 = result.nodes.find { it.node.index == 1 }!!
+        val node2 = result.nodes.find { it.node.index == 2 }!!
+
+        // Branches placed horizontally side-by-side
+        assertTrue("Then branch should be to the left of Else branch", node1.x < node2.x)
+        assertEquals(node1.y, node2.y, 0.01f)
+
+        // Skipped detection: node 2 is skipped because then branch succeeded
+        assertFalse("Then branch must not be skipped", node1.isSkipped)
+        assertTrue("Else branch must be marked skipped", node2.isSkipped)
+
+        // If node should be SUCCEEDED because executed then branch succeeded
+        assertEquals("SUCCEEDED", node0.status)
+
+        // Edge types & labels
+        val edgeTrue = result.edges.find { it.toNode.node.index == 1 }!!
+        val edgeFalse = result.edges.find { it.toNode.node.index == 2 }!!
+        assertEquals(EdgeType.IF_TRUE, edgeTrue.edgeType)
+        assertEquals("✓ True", edgeTrue.label)
+        assertFalse(edgeTrue.isSkipped)
+
+        assertEquals(EdgeType.IF_FALSE, edgeFalse.edgeType)
+        assertEquals("✗ False", edgeFalse.label)
+        assertTrue(edgeFalse.isSkipped)
+    }
+
+    @Test
+    fun testRepeatAndWhileLoopbackEdge() {
+        // Repeat layout:
+        //       Node 0 (repeat, count=3)
+        //          │ (LOOP_ENTRY)
+        //          ▼
+        //       Node 1 (do)
+        //          ↺ (LOOP_BACK, badge="×3")
+        val n0 = RtdlNode(index = 0, kindId = 4, kind = "repeat", children = listOf(1), description = "Repeat 3 times", repeatCount = 3)
+        val n1 = RtdlNode(index = 1, kindId = 2, kind = "do", children = emptyList(), call = CapabilityCall("c1", "arm", "wave", "waveHand"))
+        val plan = RtdlPlan("p_loop", "s_loop", 1, 0, listOf(n0, n1))
+
+        val nodeStates = mapOf(
+            0 to RtdlNodeState(0, "RUNNING", operatorDetail = "iteration 1 of 3"),
+            1 to RtdlNodeState(1, "RUNNING"),
+        )
+
+        val result = TreeLayoutEngine.computeLayout(plan, nodeStates)
+
+        assertEquals(2, result.nodes.size)
+        // Expect 2 edges: 1 loop entry edge (0 -> 1) and 1 loopback edge (1 -> 0)
+        assertEquals(2, result.edges.size)
+
+        val entryEdge = result.edges.find { it.edgeType == EdgeType.LOOP_ENTRY }!!
+        assertEquals(0, entryEdge.fromNode.node.index)
+        assertEquals(1, entryEdge.toNode.node.index)
+        assertTrue(entryEdge.isActivePath)
+
+        val loopBackEdge = result.edges.find { it.edgeType == EdgeType.LOOP_BACK }!!
+        assertEquals(1, loopBackEdge.fromNode.node.index)
+        assertEquals(0, loopBackEdge.toNode.node.index)
+        assertEquals("×3", loopBackEdge.badge)
     }
 }

@@ -1,6 +1,9 @@
 package com.robonix.client.ui.settings
 
 import android.Manifest
+import android.content.ClipData
+import android.content.Intent
+import android.widget.Toast
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -40,19 +43,30 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.robonix.client.AppLog
+import com.robonix.client.data.audio.AudioBridgeStatus
 import com.robonix.client.data.model.ClientSettings
 import com.robonix.client.ui.audio.AudioViewModel
+import com.robonix.client.ui.audio.BridgeControls
+import com.robonix.client.ui.audio.currentDevice
+import com.robonix.client.ui.audio.DevicePendingHint
 import com.robonix.client.ui.audio.Dropdown
 import com.robonix.client.ui.audio.TestResultClass
 import com.robonix.client.ui.audio.VuMeter
+import com.robonix.client.ui.audio.deviceOptions
+import com.robonix.client.ui.components.BridgeTakeoverDialog
 import com.robonix.client.ui.components.PulsingStatusDot
 import com.robonix.client.ui.i18n.AppStrings
 import com.robonix.client.ui.i18n.t
 import com.robonix.client.ui.i18n.tStatus
 import com.robonix.client.ui.navigation.SharedViewModel
 import com.robonix.client.ui.theme.*
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 
 private val languageOptions = listOf(
@@ -77,6 +91,7 @@ fun SettingsScreen(
     val snapshot by sharedViewModel.systemSnapshot.collectAsState()
 
     val audioState by audioViewModel.uiState.collectAsState()
+    val bridgeStatus by audioViewModel.bridgeStatus.collectAsState()
     val handsfreeStatus by audioViewModel.handsfree.status.collectAsState()
     val handsfreeBusy by audioViewModel.handsfree.busy.collectAsState()
     val handsfreeError by audioViewModel.handsfree.error.collectAsState()
@@ -116,7 +131,7 @@ fun SettingsScreen(
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) audioViewModel.testMicrophone()
+        if (granted) audioViewModel.testMicrophone(settings)
     }
     val enrollPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -169,6 +184,9 @@ fun SettingsScreen(
                     AudioSettingsTab(
                         settings = settings,
                         audioState = audioState,
+                        bridgeStatus = bridgeStatus,
+                        onConnectBridge = { audioViewModel.connectBridge(sharedViewModel.settings.value) },
+                        onDisconnectBridge = audioViewModel::disconnectBridge,
                         handsfreeStatus = handsfreeStatus,
                         handsfreeBusy = handsfreeBusy,
                         handsfreeError = handsfreeError,
@@ -176,7 +194,7 @@ fun SettingsScreen(
                         onToggleHandsfree = { audioViewModel.toggleHandsfree(sharedViewModel.settings.value) },
                         onSelectMicProvider = { id ->
                             audioViewModel.selectMicProvider(settings.atlasEndpoint, id)
-                            sharedViewModel.updateSettings { it.copy(micNodeId = id) }
+                            sharedViewModel.updateSettings { it.copy(micNodeId = id, micDeviceId = "") }
                         },
                         onSelectMicDevice = { id ->
                             audioViewModel.selectMicDevice(id)
@@ -184,7 +202,7 @@ fun SettingsScreen(
                         },
                         onSelectSpeakerProvider = { id ->
                             audioViewModel.selectSpeakerProvider(settings.atlasEndpoint, id)
-                            sharedViewModel.updateSettings { it.copy(speakerNodeId = id) }
+                            sharedViewModel.updateSettings { it.copy(speakerNodeId = id, speakerDeviceId = "") }
                         },
                         onSelectSpeakerDevice = { id ->
                             audioViewModel.selectSpeakerDevice(id)
@@ -197,19 +215,18 @@ fun SettingsScreen(
                             )
                         },
                         onApplyRoute = {
-                            sharedViewModel.saveSettings()
-                            audioViewModel.applyRoute(sharedViewModel.settings.value)
+                            audioViewModel.applyRoute(sharedViewModel.settings.value, sharedViewModel::saveSettings)
                         },
                         onTestMic = {
                             if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
                                 PackageManager.PERMISSION_GRANTED
                             ) {
-                                audioViewModel.testMicrophone()
+                                audioViewModel.testMicrophone(settings)
                             } else {
                                 permLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             }
                         },
-                        onTestSpeaker = { audioViewModel.testSpeaker() },
+                        onTestSpeaker = { audioViewModel.testSpeaker(settings) },
                         onStartVuRecording = { audioViewModel.startRecording() },
                         onStopVuRecording = { audioViewModel.stopRecording() },
                         onUpdateEnrollUserId = { audioViewModel.updateEnrollUserId(it) },
@@ -232,6 +249,13 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+
+    if (audioState.bridgeTakeoverPrompt) {
+        BridgeTakeoverDialog(
+            onConfirm = { audioViewModel.confirmBridgeTakeover(sharedViewModel.settings.value) },
+            onDismiss = { audioViewModel.dismissBridgeTakeover() },
+        )
     }
 }
 
@@ -487,7 +511,9 @@ private fun NetworkSettingsTab(
 ) {
     var portText by remember(settings.atlasPort) { mutableStateOf(settings.atlasPort.toString()) }
     var showLangDialog by remember { mutableStateOf(false) }
-    var showDevLogsDialog by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val shareScope = rememberCoroutineScope()
+    val shareFailed = t("settings.logs.share.failed")
     val currentLangLabel = languageOptions
         .firstOrNull { it.first == settings.language }?.second
         ?: "settings.language.system"
@@ -716,40 +742,48 @@ private fun NetworkSettingsTab(
             }
         }
 
+        // ── Logs ── (release builds are not debuggable, so adb run-as cannot read the file)
+        item {
+            SectionLabel(t("settings.section.logs"))
+            SettingsGroup {
+                SettingRow(
+                    icon = Icons.Default.Share,
+                    iconTint = Cyan,
+                    label = t("settings.logs.share"),
+                    description = t("settings.logs.share.desc"),
+                    showDivider = false,
+                    onClick = {
+                        shareScope.launch {
+                            try {
+                                val file = withContext(Dispatchers.IO) { AppLog.exportDiagnostics(context) }
+                                val uri = FileProvider.getUriForFile(context, "${context.packageName}.diagnostics", file)
+                                val send = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    clipData = ClipData.newRawUri(file.name, uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(Intent.createChooser(send, null))
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                AppLog.write("SETTINGS", "diagnostic export failed", e)
+                                Toast.makeText(context, shareFailed, Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                ) {
+                    Icon(Icons.Default.ChevronRight, null, tint = Dim, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+
         // Language picker dialog
         if (showLangDialog) {
             item {
                 // Rendered inline for simplicity; actual dialog is outside LazyColumn
             }
         }
-
-        // ── About & Diagnostics ──
-        item {
-            SectionLabel(t("settings.section.about_debug"))
-            SettingsGroup {
-                SettingRow(
-                    icon = Icons.Default.Info,
-                    iconTint = Muted,
-                    label = t("app.name"),
-                    description = "v0.5 · Android Native",
-                    showDivider = true,
-                )
-                SettingRow(
-                    icon = Icons.Default.Terminal,
-                    iconTint = Cyan,
-                    label = t("settings.dev_logs"),
-                    description = t("settings.dev_logs.desc"),
-                    showDivider = false,
-                    onClick = { showDevLogsDialog = true },
-                ) {
-                    Icon(Icons.Default.ChevronRight, null, tint = Dim, modifier = Modifier.size(16.dp))
-                }
-            }
-        }
-    }
-
-    if (showDevLogsDialog) {
-        DeveloperLogsDialog(onDismissRequest = { showDevLogsDialog = false })
     }
 
     // Language Dialog (outside LazyColumn to avoid scroll issues)
@@ -811,6 +845,9 @@ private fun NetworkSettingsTab(
 private fun AudioSettingsTab(
     settings: ClientSettings,
     audioState: com.robonix.client.ui.audio.AudioUiState,
+    bridgeStatus: AudioBridgeStatus,
+    onConnectBridge: () -> Unit,
+    onDisconnectBridge: () -> Unit,
     handsfreeStatus: com.robonix.client.data.model.HandsfreeStatus?,
     handsfreeBusy: Boolean,
     handsfreeError: String?,
@@ -854,7 +891,7 @@ private fun AudioSettingsTab(
                     Switch(
                         checked = hfEnabled,
                         onCheckedChange = { onToggleHandsfree() },
-                        enabled = !handsfreeBusy && !voiceBusy,
+                        enabled = !handsfreeBusy && !voiceBusy && !audioState.bridgeBusy,
                         colors = SwitchDefaults.colors(
                             checkedTrackColor = Green,
                             checkedThumbColor = Bg,
@@ -938,6 +975,12 @@ private fun AudioSettingsTab(
             SectionLabel(t("audio.route.title"))
             SettingsGroup {
                 Column(modifier = Modifier.padding(14.dp)) {
+                    val micCurrent = audioState.currentDevice(
+                        settings, bridgeStatus, audioState.selectedMicProvider, audioState.currentMicDevice,
+                    )
+                    val speakerCurrent = audioState.currentDevice(
+                        settings, bridgeStatus, audioState.selectedSpeakerProvider, audioState.currentSpeakerDevice,
+                    )
                     // Input section
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.Mic, null, tint = Cyan, modifier = Modifier.size(14.dp))
@@ -953,11 +996,12 @@ private fun AudioSettingsTab(
                     )
                     Spacer(Modifier.height(4.dp))
                     Dropdown(
-                        audioState.micDevices.associate { it.id to it.name.ifBlank { it.id } },
+                        deviceOptions(audioState.micDevices, micCurrent),
                         audioState.selectedMicDevice,
                         onSelectMicDevice,
                         if (audioState.devicesBusy) t("audio.route.device.loading") else t("audio.route.device.none"),
                     )
+                    DevicePendingHint(audioState.micDevices, audioState.selectedMicDevice, micCurrent)
 
                     Spacer(Modifier.height(12.dp))
                     HorizontalDivider(color = Line.copy(alpha = 0.4f), thickness = 0.5.dp)
@@ -978,13 +1022,16 @@ private fun AudioSettingsTab(
                     )
                     Spacer(Modifier.height(4.dp))
                     Dropdown(
-                        audioState.speakerDevices.associate { it.id to it.name.ifBlank { it.id } },
+                        deviceOptions(audioState.speakerDevices, speakerCurrent),
                         audioState.selectedSpeakerDevice,
                         onSelectSpeakerDevice,
                         if (audioState.devicesBusy) t("audio.route.device.loading") else t("audio.route.device.none"),
                     )
+                    DevicePendingHint(audioState.speakerDevices, audioState.selectedSpeakerDevice, speakerCurrent)
 
                     Spacer(Modifier.height(12.dp))
+
+                    BridgeControls(settings, audioState, bridgeStatus, onConnectBridge, onDisconnectBridge)
 
                     // Action buttons
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1060,6 +1107,7 @@ private fun AudioSettingsTab(
                         Surface(
                             color = when (audioState.testResultClass) {
                                 TestResultClass.Success -> Green.copy(alpha = 0.08f)
+                                TestResultClass.Warning -> Amber.copy(alpha = 0.08f)
                                 TestResultClass.Error -> Red.copy(alpha = 0.08f)
                                 TestResultClass.None -> Panel2
                             },
@@ -1072,6 +1120,7 @@ private fun AudioSettingsTab(
                                 audioState.testStatus,
                                 color = when (audioState.testResultClass) {
                                     TestResultClass.Success -> Green
+                                    TestResultClass.Warning -> Amber
                                     TestResultClass.Error -> Red
                                     TestResultClass.None -> Text
                                 },
@@ -1226,8 +1275,6 @@ private fun SystemSettingsTab(
     snapshot: com.robonix.client.data.model.SystemSnapshot?,
     onRefresh: () -> Unit,
 ) {
-    var showDevLogsDialog by remember { mutableStateOf(false) }
-
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -1368,25 +1415,6 @@ private fun SystemSettingsTab(
                 }
             }
         }
-        item {
-            SectionLabel(t("settings.section.debug_logs"))
-            SettingsGroup {
-                SettingRow(
-                    icon = Icons.Default.Terminal,
-                    iconTint = Cyan,
-                    label = t("settings.dev_logs"),
-                    description = t("settings.dev_logs.desc"),
-                    showDivider = false,
-                    onClick = { showDevLogsDialog = true },
-                ) {
-                    Icon(Icons.Default.ChevronRight, null, tint = Dim, modifier = Modifier.size(16.dp))
-                }
-            }
-        }
-    }
-
-    if (showDevLogsDialog) {
-        DeveloperLogsDialog(onDismissRequest = { showDevLogsDialog = false })
     }
 }
 
